@@ -1,0 +1,8 @@
+<ul class="status-list">
+  {% for item in recent %}
+  <li>
+    <span>{{ item.title }}</span>
+    <span class="badge badge-{{ item.status.value }}">{{ item.status.value }}</span>
+  </li>
+  {% endfor %}
+</ul>

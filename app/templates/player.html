@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} — QAS Media{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/vendor/videojs/video-js.min.css">
+{% endblock %}
+{% block content %}
+<article class="player-page">
+  <a href="/" class="back-link">← Back to Media</a>
+  <h1 class="page-title">{{ item.title }}</h1>
+  {% if item.description %}<p class="description">{{ item.description }}</p>{% endif %}
+  <p class="meta">
+    {{ item.published_at.strftime('%B %d, %Y') }}
+    · <span class="media-type-badge media-type-{{ item.media_type.value }}">{{ item.media_type.value }}</span>
+    {% if item.duration_seconds %}· {{ item.duration_seconds | format_duration }}{% endif %}
+    {% if item.file_size %}· {{ item.file_size | format_file_size }}{% endif %}
+  </p>
+
+  <div class="player-wrap" oncontextmenu="return false;">
+    <video
+      id="media-player"
+      class="video-js vjs-default-skin player"
+      playsinline
+      preload="metadata"
+      data-media-type="{{ item.media_type.value }}"
+      data-media-id="{{ item.id }}"
+      {% if item.media_type.value == 'video' and item.thumbnail_key %}poster="/thumbnail/{{ item.id }}"{% endif %}
+    >
+      <source src="/stream/{{ item.id }}" type="{{ item.mime_type }}">
+    </video>
+  </div>
+
+  <div class="player-actions">
+    <button type="button" class="btn-primary save-offline-btn" data-media-id="{{ item.id }}" data-title="{{ item.title }}">
+      Save for offline
+    </button>
+    <button type="button" class="btn-secondary remove-offline-btn hidden" data-media-id="{{ item.id }}">
+      Remove offline
+    </button>
+    {% if user and (user.id == item.uploaded_by_id or is_superuser) %}
+    <form action="/media/{{ item.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('Delete this media?')">
+      <button type="submit" class="btn-danger">Delete</button>
+    </form>
+    {% endif %}
+    <span class="offline-status" id="offline-status"></span>
+  </div>
+</article>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/videojs/video.min.js" defer></script>
+<script src="/static/js/player.js" defer></script>
+{% endblock %}

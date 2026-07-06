@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}QAS Media — Sermons{% endblock %}
+{% block content %}
+<h1 class="page-title">Media</h1>
+{% if items %}
+<ul class="media-list">
+  {% for item in items %}
+  <li class="media-item">
+    <a href="/media/{{ item.id }}" class="media-link">
+      {% if item.thumbnail_key %}
+      <img src="/thumbnail/{{ item.id }}" alt="" class="thumb" loading="lazy">
+      {% else %}
+      <div class="thumb thumb-placeholder">{{ item.media_type.value[0]|upper }}</div>
+      {% endif %}
+      <div class="media-info">
+        <span class="media-title">{{ item.title }}</span>
+        <span class="media-meta">
+          <span class="media-type-badge media-type-{{ item.media_type.value }}">{{ item.media_type.value }}</span>
+          {% if item.duration_seconds %}
+          <span class="media-duration">{{ item.duration_seconds | format_duration }}</span>
+          {% endif %}
+          <span class="media-date">{{ item.published_at.strftime('%b %d, %Y') }}</span>
+        </span>
+      </div>
+    </a>
+    <button type="button" class="btn-secondary btn-sm save-offline-btn" data-media-id="{{ item.id }}" data-title="{{ item.title }}">
+      Save offline
+    </button>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No media yet.</p>
+{% endif %}
+{% endblock %}

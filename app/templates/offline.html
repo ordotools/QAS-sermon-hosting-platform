@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Offline — QAS Media{% endblock %}
+{% block content %}
+<h1 class="page-title">Saved for offline</h1>
+<p class="hint">Media saved here plays without a network connection.</p>
+<p id="offline-storage-info" class="hint"></p>
+<ul id="offline-list" class="media-list"></ul>
+<p id="offline-empty" class="empty hidden">Nothing saved offline yet.</p>
+{% endblock %}
+{% block scripts %}
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.QASOffline) QASOffline.renderOfflineList();
+  });
+</script>
+{% endblock %}

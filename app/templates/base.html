@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1a365d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="QAS Media">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+  <link rel="icon" href="/static/icons/icon-192.png">
+  <title>{% block title %}QAS Media{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="site-header">
+    <a href="/" class="logo">QAS Media</a>
+    <nav class="nav">
+      {% if user %}
+        <a href="/upload">Upload</a>
+        {% if is_superuser %}<a href="/admin">Admin</a>{% endif %}
+        <form action="/logout" method="post" class="inline-form">
+          <button type="submit" class="link-btn">Logout</button>
+        </form>
+      {% else %}
+        <a href="/login">Login</a>
+      {% endif %}
+      <a href="/offline" id="offline-link">Offline</a>
+    </nav>
+  </header>
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+  <div id="offline-banner" class="offline-banner hidden" role="status">You are offline</div>
+  <script src="/static/js/pwa.js" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

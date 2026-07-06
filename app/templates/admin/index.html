@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Admin — QAS Media{% endblock %}
+{% block content %}
+<h1 class="page-title">Admin</h1>
+{% if message %}<p class="notice">{{ message }}</p>{% endif %}
+
+<section class="admin-section">
+  <h2>Users</h2>
+  <ul class="admin-list">
+    {% for u in users %}
+    <li>
+      <span>{{ u.email }} ({{ u.role.value }}){% if not u.is_active %} — inactive{% endif %}</span>
+      {% if u.id != user.id %}
+      {% if u.is_active %}
+      <form action="/admin/users/{{ u.id }}/deactivate" method="post" class="inline-form">
+        <button type="submit" class="btn-secondary btn-sm">Deactivate</button>
+      </form>
+      {% else %}
+      <form action="/admin/users/{{ u.id }}/reactivate" method="post" class="inline-form">
+        <button type="submit" class="btn-secondary btn-sm">Reactivate</button>
+      </form>
+      {% endif %}
+      {% if u.role.value != 'superuser' %}
+      <form action="/admin/users/{{ u.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('Delete user?')">
+        <button type="submit" class="btn-danger btn-sm">Delete</button>
+      </form>
+      {% endif %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="admin-section">
+  <h2>Invites</h2>
+  <form action="/admin/invites" method="post" class="form inline-form-row">
+    <label>Max uses <input type="number" name="max_uses" value="1" min="1" class="input-sm"></label>
+    <label>Expires (days) <input type="number" name="expires_days" value="7" min="0" class="input-sm"></label>
+    <button type="submit" class="btn-primary btn-sm">Create invite</button>
+  </form>
+  <ul class="admin-list">
+    {% for inv in invites %}
+    <li>
+      <span>#{{ inv.id }} — uses {{ inv.uses }}/{{ inv.max_uses }}{% if inv.revoked %} (revoked){% endif %}</span>
+      {% if not inv.revoked %}
+      <form action="/admin/invites/{{ inv.id }}/revoke" method="post" class="inline-form">
+        <button type="submit" class="btn-secondary btn-sm">Revoke</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="admin-section">
+  <h2>Media</h2>
+  <ul class="admin-list">
+    {% for m in media_items %}
+    <li>
+      <span>{{ m.title }} ({{ m.status.value }})</span>
+      <a href="/media/{{ m.id }}" class="btn-secondary btn-sm">View</a>
+      <form action="/admin/media/{{ m.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('Delete media?')">
+        <button type="submit" class="btn-danger btn-sm">Delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}
