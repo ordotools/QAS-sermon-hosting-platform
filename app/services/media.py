@@ -1,4 +1,3 @@
-import json
 import logging
 import subprocess
 import tempfile
@@ -12,6 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.models import MediaItem, MediaStatus, MediaType
+from app.services.media_formats import (
+    _resolve_binary,
+    can_remux_video_to_mp4,
+    needs_transcode,
+    normalize_storage_key,
+    probe_media,
+    remux_video_to_mp4,
+    transcode_audio,
+    transcode_video,
+    validate_probe,
+)
 from app.storage import get_storage
 
 AUDIO_MIMES = {"audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/wav", "audio/ogg", "audio/webm"}
@@ -24,39 +34,6 @@ def detect_media_type(mime_type: str) -> MediaType:
     return MediaType.audio
 
 
-def _run_ffprobe(path: str) -> dict:
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return json.loads(result.stdout)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def _extract_duration(probe: dict) -> float | None:
-    fmt = probe.get("format", {})
-    duration = fmt.get("duration")
-    if duration:
-        return float(duration)
-    for stream in probe.get("streams", []):
-        if stream.get("duration"):
-            return float(stream["duration"])
-    return None
-
-
 def _generate_thumbnail(src_path: str, media_type: MediaType, duration: float | None) -> str | None:
     if media_type == MediaType.audio:
         return None
@@ -65,9 +42,12 @@ def _generate_thumbnail(src_path: str, media_type: MediaType, duration: float | 
     if duration and duration < 10:
         seek = max(duration / 2, 0.5)
     try:
+        ffmpeg = _resolve_binary("ffmpeg")
+        if ffmpeg is None:
+            return None
         subprocess.run(
             [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-ss",
                 str(seek),
@@ -136,12 +116,45 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
         Path(temp_path).unlink(missing_ok=True)
         return
 
+    transcode_path: str | None = None
     try:
-        probe = _run_ffprobe(temp_path)
-        duration = _extract_duration(probe)
-        await storage.save_file(item.storage_key, temp_path)
+        probe = probe_media(temp_path)
+        validation_error = validate_probe(probe)
+        if validation_error:
+            logger.error(
+                "Media validation failed for item %s: %s", media_id, validation_error
+            )
+            item.status = MediaStatus.failed
+            item.updated_at = datetime.utcnow()
+            return
 
-        thumb_local = _generate_thumbnail(temp_path, item.media_type, duration)
+        if probe.media_type:
+            item.media_type = probe.media_type
+
+        final_path = temp_path
+        if needs_transcode(probe):
+            suffix = ".mp4" if probe.media_type == MediaType.video else ".m4a"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                transcode_path = tmp.name
+            if probe.media_type == MediaType.video:
+                if can_remux_video_to_mp4(probe):
+                    remux_video_to_mp4(temp_path, transcode_path)
+                else:
+                    transcode_video(temp_path, transcode_path)
+            else:
+                transcode_audio(temp_path, transcode_path)
+            final_path = transcode_path
+            item.storage_key, item.mime_type = normalize_storage_key(
+                item.storage_key, probe.media_type
+            )
+
+        final_probe = probe_media(final_path)
+        duration = final_probe.duration if final_probe.probe_ok else probe.duration
+
+        await storage.save_file(item.storage_key, final_path)
+        item.file_size = Path(final_path).stat().st_size
+
+        thumb_local = _generate_thumbnail(final_path, item.media_type, duration)
         if thumb_local:
             thumb_key = f"thumbnails/{item.id}.jpg"
             await storage.save_file(thumb_key, thumb_local)
@@ -157,6 +170,8 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
         item.updated_at = datetime.utcnow()
     finally:
         Path(temp_path).unlink(missing_ok=True)
+        if transcode_path:
+            Path(transcode_path).unlink(missing_ok=True)
         session.add(item)
         await session.commit()
 

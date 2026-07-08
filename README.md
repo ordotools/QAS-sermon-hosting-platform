@@ -7,7 +7,7 @@ FastAPI + HTMX + PWA platform for sermon and media hosting. Public playback, aut
 - Public chronological media list and HTML5 player
 - Session-based auth (user / superuser roles)
 - Invite-only registration
-- Media upload with ffmpeg thumbnails and ffprobe metadata
+- Media upload with ffprobe validation, automatic transcoding, upload progress, and ffmpeg thumbnails
 - Range-aware stream proxy (no raw storage URLs exposed)
 - PWA installability and save-for-offline playback
 - Local storage (dev) or Backblaze B2 (prod)
@@ -17,7 +17,7 @@ FastAPI + HTMX + PWA platform for sermon and media hosting. Public playback, aut
 ### Prerequisites
 
 - Python 3.12+
-- ffmpeg (for thumbnails/metadata)
+- ffmpeg (validation, transcoding, thumbnails, metadata)
 
 ### Setup
 
@@ -43,10 +43,24 @@ Default superuser comes from `.env` (`SUPERUSER_EMAIL` / `SUPERUSER_PASSWORD`).
 2. Create an invite link and copy it
 3. Share the link; recipient registers at `/register?token=...`
 
-### Recommended media formats
+### Supported media formats
 
-- Video: MP4 (H.264), WebM
-- Audio: MP3, M4A
+Upload accepts `.mp4`, `.mov`, `.m4a`, `.mp3`, `.webm`, and `.ogg`. Files are validated with ffprobe on upload; invalid or non-media files are rejected before a record is created.
+
+| Source | Typical file | Server action |
+|--------|--------------|---------------|
+| iPhone camera (default) | `.mov` (HEVC + AAC) | Transcode → H.264 MP4 + AAC |
+| iPhone "Most Compatible" | `.mov` / `.mp4` (H.264 + AAC) | Passthrough (remux with faststart when needed) |
+| iPhone Voice Memos | `.m4a` (AAC) | Passthrough |
+| iPhone Voice Memos (Lossless) | `.m4a` (ALAC) | Transcode → AAC M4A |
+| Common uploads | `.mp3` | Passthrough |
+| WebM / OGG | `.webm` / `.ogg` | Transcode to H.264 MP4 or AAC M4A |
+
+Rejected: images (`.heic`, `.jpg`, etc.), documents, archives, corrupt/unreadable files, and files with no audio or video stream.
+
+iPhone video (`.mov`) and voice memos (`.m4a`) are supported; files are converted automatically for web playback.
+
+**Upload UX:** a progress bar shows bytes reaching the server; after upload completes, the processing status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Large iPhone 4K HEVC files may take several minutes to transcode.
 
 ## Docker (PostgreSQL)
 
@@ -83,7 +97,7 @@ Use the S3-compatible endpoint for your bucket region. Streams always go through
 - Terminate TLS at nginx/Caddy (required for service workers)
 - Set a strong `SECRET_KEY`
 - Configure `MAX_UPLOAD_SIZE_MB` as needed
-- Run with a single uvicorn worker (in-memory rate limits and background processing are per-process)
+- Run with a single uvicorn worker (in-memory rate limits and background transcoding/thumbnails are per-process; uploads queue behind each other)
 
 ## PWA manual QA
 

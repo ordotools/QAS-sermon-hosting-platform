@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from app.config import get_settings
 from app.database import async_session, init_db
 from app.routers import admin, auth, public, stream, upload
 from app.services.auth import bootstrap_superuser
+from app.services.media_formats import ffprobe_available, media_tools_error
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -19,6 +23,8 @@ async def lifespan(app: FastAPI):
     await init_db()
     async with async_session() as session:
         await bootstrap_superuser(session, settings.superuser_email, settings.superuser_password)
+    if not ffprobe_available():
+        logger.warning(media_tools_error())
     yield
 
 

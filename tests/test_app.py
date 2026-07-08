@@ -106,6 +106,106 @@ async def test_upload_rejects_invalid_date(auth_client):
 
 
 @pytest.mark.asyncio
+async def test_upload_rejects_disallowed_extension(auth_client):
+    r = await auth_client.post(
+        "/upload",
+        data={"title": "Doc", "description": "", "published_at": ""},
+        files={"file": ("notes.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert r.status_code == 400
+    assert "Unsupported file type" in r.text
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_disallowed_extension_json(auth_client):
+    r = await auth_client.post(
+        "/upload",
+        data={"title": "Doc", "description": "", "published_at": ""},
+        files={"file": ("notes.pdf", b"%PDF-1.4", "application/pdf")},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False
+    assert "Unsupported file type" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_garbage_bytes(auth_client):
+    r = await auth_client.post(
+        "/upload",
+        data={"title": "Bad audio", "description": "", "published_at": ""},
+        files={"file": ("test.mp3", b"not-valid-media-bytes", "audio/mpeg")},
+    )
+    assert r.status_code == 400
+    assert "Could not read file" in r.text
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_garbage_bytes_json(auth_client):
+    r = await auth_client.post(
+        "/upload",
+        data={"title": "Bad audio", "description": "", "published_at": ""},
+        files={"file": ("test.mp3", b"not-valid-media-bytes", "audio/mpeg")},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["ok"] is False
+    assert "Could not read file" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_upload_valid_mp3_creates_ready_record(auth_client, session, monkeypatch):
+    from fastapi import BackgroundTasks
+    from sqlmodel import select
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.media import process_media
+    from app.services.media_formats import MediaProbe
+
+    mp3_probe = MediaProbe(
+        media_type=MediaType.audio,
+        video_codec=None,
+        audio_codec="mp3",
+        duration=1.0,
+        container="mp3",
+        has_video=False,
+        has_audio=True,
+        probe_ok=True,
+    )
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: mp3_probe)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: mp3_probe)
+
+    pending: list[tuple] = []
+
+    def capture_task(self, func, *args, **kwargs):
+        pending.append((func, args, kwargs))
+
+    monkeypatch.setattr(BackgroundTasks, "add_task", capture_task)
+
+    r = await auth_client.post(
+        "/upload",
+        data={"title": "Sermon", "description": "", "published_at": ""},
+        files={"file": ("test.mp3", b"\x00" * 64, "audio/mpeg")},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    media_id = body["media_id"]
+
+    assert len(pending) == 1
+    _, args, _ = pending[0]
+    await process_media(session, args[0], args[1])
+
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.status == MediaStatus.ready
+    assert item.media_type == MediaType.audio
+
+
+@pytest.mark.asyncio
 async def test_admin_requires_superuser(auth_client):
     r = await auth_client.get("/admin")
     assert r.status_code == 403

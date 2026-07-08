@@ -25,6 +25,9 @@ Phased implementation checklist. Public read for media; auth required for upload
 - [x] Upload form (title, published date, file)
 - [x] Background thumbnail + ffprobe metadata
 - [x] Superuser + user can upload; processing status in UI
+- [x] ffprobe validation on upload (reject invalid/non-media before DB record)
+- [x] Automatic transcoding (HEVC/ALAC/WebM/OGG → H.264 MP4 or AAC M4A)
+- [x] Upload progress bar (XHR + server JSON response)
 
 ## Phase 3 — Public viewer
 
@@ -74,7 +77,7 @@ Phased implementation checklist. Public read for media; auth required for upload
 
 - DRM / encrypted streams
 - Email delivery of invites
-- Video transcoding (accept browser-friendly mp4/webm + mp3/m4a)
+- Resumable/chunked upload protocol (tus); large files upload in one request with progress only
 - Full-text search, tags, playlists
 - Multiple organizations/tenants
 

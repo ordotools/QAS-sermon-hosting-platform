@@ -3,7 +3,7 @@
 {% block content %}
 <h1 class="page-title">Upload</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form method="post" action="/upload" enctype="multipart/form-data" class="form">
+<form id="upload-form" method="post" action="/upload" enctype="multipart/form-data" class="form">
   <label>
     Title
     <input type="text" name="title" required maxlength="200">
@@ -17,21 +17,32 @@
     <input type="datetime-local" name="published_at">
   </label>
   <label>
-    Media file (mp4, webm, mp3, m4a)
-    <input type="file" name="file" required accept="video/*,audio/*">
+    Media file
+    <input type="file" name="file" required accept=".mp4,.mov,.m4a,.mp3,.webm,.ogg,audio/*,video/*">
   </label>
-  <button type="submit" class="btn-primary">Upload</button>
+  <p class="hint upload-hint">iPhone video (.mov) and voice memos (.m4a) are supported; files are converted automatically for web playback.</p>
+  <div id="upload-progress" class="upload-progress hidden" aria-live="polite">
+    <progress id="upload-progress-bar" max="100" aria-label="Upload progress">0</progress>
+    <span id="upload-progress-text" class="upload-progress-text">0%</span>
+    <button type="button" id="upload-cancel" class="btn-secondary btn-sm">Cancel</button>
+  </div>
+  <p id="upload-message" class="upload-message hidden" role="status"></p>
+  <p id="upload-error" class="error upload-error hidden" role="alert"></p>
+  <button type="submit" id="upload-submit" class="btn-primary">Upload</button>
 </form>
 
-{% if recent %}
-<h2 class="section-title">Recent uploads</h2>
-<div
-  id="upload-status"
-  hx-get="/upload/status"
-  hx-trigger="every 3s"
-  hx-swap="innerHTML"
->
-  {% include "partials/upload_status.html" %}
+<div id="upload-status-section"{% if not recent %} class="hidden"{% endif %}>
+  <h2 class="section-title">Recent uploads</h2>
+  <div
+    id="upload-status"
+    hx-get="/upload/status"
+    hx-trigger="every 3s"
+    hx-swap="innerHTML"
+  >
+    {% if recent %}{% include "partials/upload_status.html" %}{% endif %}
+  </div>
 </div>
-{% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/upload.js" defer></script>
 {% endblock %}

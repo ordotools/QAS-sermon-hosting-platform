@@ -132,3 +132,59 @@ body {
 }
 .hidden { display: none !important; }
 .offline-status { font-size: 0.875rem; color: #718096; }
+
+.upload-hint { margin: -0.5rem 0 1rem; font-size: 0.875rem; }
+
+.upload-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.upload-progress progress {
+  flex: 1;
+  height: 0.5rem;
+  border: none;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.upload-progress progress::-webkit-progress-bar {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.upload-progress progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.upload-progress progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.upload-progress-text {
+  min-width: 2.5rem;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  color: #4a5568;
+}
+
+.upload-message {
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  background: #ebf8ff;
+  color: #2c5282;
+}
+
+.upload-error { margin: 0 0 1rem; }
+
+.btn-primary:disabled,
+.btn-primary.is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
