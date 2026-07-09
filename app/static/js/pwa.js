@@ -1,4 +1,4 @@
-const META_KEY = 'qas-offline-meta';
+const META_URL = '/__qas_offline_meta__';
 const CACHE_MEDIA = 'qas-media-v1';
 const QUOTA_MARGIN = 0.9;
 const SAVE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -101,8 +101,26 @@ const QASOffline = {
       }
 
       const url = this.streamUrl(mediaId);
-      await this.postToSW({ type: 'CACHE_MEDIA', url, mediaId, title, size: fileSize });
-      if (btn) btn.textContent = 'Saved';
+      const mediaType = btn?.dataset.mediaType || null;
+      const durationSeconds = btn?.dataset.duration ? parseInt(btn.dataset.duration, 10) : null;
+      const publishedAt = btn?.dataset.publishedAt || null;
+      const hasThumbnail = btn?.dataset.hasThumbnail === '1';
+      await this.postToSW({
+        type: 'CACHE_MEDIA',
+        url,
+        mediaId,
+        title,
+        size: fileSize,
+        mediaType,
+        durationSeconds,
+        publishedAt,
+        hasThumbnail,
+      });
+      if (btn) {
+        btn.textContent = 'Saved offline';
+        btn.classList.add('is-saved');
+        btn.disabled = true;
+      }
       await this.updatePlayerButtons(mediaId);
       this.renderStorageInfo();
     } catch (e) {
@@ -131,7 +149,7 @@ const QASOffline = {
   async getMeta() {
     if (!('caches' in window)) return {};
     const cache = await caches.open(CACHE_MEDIA);
-    const res = await cache.match(META_KEY);
+    const res = await cache.match(META_URL);
     if (!res) return {};
     return res.json();
   },
@@ -139,6 +157,14 @@ const QASOffline = {
   async isSaved(mediaId) {
     const meta = await this.getMeta();
     return Boolean(meta[String(mediaId)]);
+  },
+
+  setSaveButtonState(btn, saved) {
+    const onList = btn.dataset.list === '1';
+    btn.textContent = saved ? 'Saved offline' : (onList ? 'Save offline' : 'Save for offline');
+    btn.disabled = saved || !this.swReady;
+    btn.classList.toggle('is-saved', saved);
+    btn.title = (!this.swReady && !saved) ? 'Offline save loading…' : '';
   },
 
   setSaveButtonsReady(ready) {
@@ -149,7 +175,7 @@ const QASOffline = {
       status.textContent = hint;
     }
     document.querySelectorAll('.save-offline-btn').forEach((btn) => {
-      if (btn.textContent === 'Saved offline' || btn.textContent === 'Saved') return;
+      if (btn.classList.contains('is-saved')) return;
       btn.disabled = !ready;
       btn.textContent = ready
         ? (btn.dataset.list ? 'Save offline' : 'Save for offline')
@@ -161,9 +187,7 @@ const QASOffline = {
   async updatePlayerButtons(mediaId) {
     const saved = await this.isSaved(mediaId);
     document.querySelectorAll(`.save-offline-btn[data-media-id="${mediaId}"]`).forEach((btn) => {
-      btn.textContent = saved ? 'Saved offline' : (btn.dataset.list ? 'Save offline' : 'Save for offline');
-      btn.disabled = saved || !this.swReady;
-      btn.title = (!this.swReady && !saved) ? 'Offline save loading…' : '';
+      this.setSaveButtonState(btn, saved);
     });
     document.querySelectorAll(`.remove-offline-btn[data-media-id="${mediaId}"]`).forEach((btn) => {
       btn.classList.toggle('hidden', !saved);
@@ -197,7 +221,19 @@ const QASOffline = {
     const empty = document.getElementById('offline-empty');
     if (!list) return;
 
-    const meta = await this.getMeta();
+    let meta = await this.getMeta();
+    const { meta: enriched, changed } = mergeMetaWithCatalog(meta, getMediaCatalog());
+    if (changed) {
+      meta = enriched;
+      if (navigator.onLine && this.getWorker()) {
+        try {
+          await this.postToSW({ type: 'ENRICH_META', meta: enriched }, 10000);
+        } catch (e) {
+          console.warn('Could not persist enriched offline meta', e);
+        }
+      }
+    }
+
     const entries = Object.entries(meta);
     list.innerHTML = '';
 
@@ -209,20 +245,9 @@ const QASOffline = {
     empty?.classList.add('hidden');
 
     for (const [id, info] of entries) {
-      const li = document.createElement('li');
-      li.className = 'media-item';
-      const sizeLabel = info.size ? ` (${this.formatBytes(info.size)})` : '';
-      li.innerHTML = `
-        <a href="/media/${id}" class="media-link">
-          <div class="media-info">
-            <span class="media-title">${escapeHtml(info.title)}${sizeLabel}</span>
-          </div>
-        </a>
-        <button type="button" class="btn-secondary btn-sm" data-remove="${id}">Remove</button>
-      `;
-      li.querySelector('[data-remove]')?.addEventListener('click', () => this.removeMedia(id));
-      list.appendChild(li);
+      list.insertAdjacentHTML('beforeend', mediaListItemHtml(id, info, { mode: 'offline' }));
     }
+    this.bindButtons();
     this.renderStorageInfo();
   },
 
@@ -236,14 +261,27 @@ const QASOffline = {
 
   bindButtons() {
     document.querySelectorAll('.save-offline-btn').forEach((btn) => {
-      btn.dataset.list = btn.closest('.media-list') ? '1' : '';
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      if (!btn.dataset.list && btn.closest('.media-list')) btn.dataset.list = '1';
       btn.addEventListener('click', () => {
+        if (btn.classList.contains('is-saved')) return;
         this.saveMedia(btn.dataset.mediaId, btn.dataset.title, btn);
       });
     });
     document.querySelectorAll('.remove-offline-btn').forEach((btn) => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
       btn.addEventListener('click', () => this.removeMedia(btn.dataset.mediaId));
     });
+  },
+
+  async syncSavedButtons() {
+    const meta = await this.getMeta();
+    for (const btn of document.querySelectorAll('.save-offline-btn')) {
+      const saved = Boolean(meta[String(btn.dataset.mediaId)]);
+      this.setSaveButtonState(btn, saved);
+    }
   },
 };
 
@@ -253,18 +291,148 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function formatDuration(seconds) {
+  if (!seconds) return '';
+  const total = Math.floor(Number(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  return `${minutes}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatPublishedDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function getMediaCatalog() {
+  const el = document.getElementById('media-catalog');
+  if (!el) return {};
+  try {
+    const items = JSON.parse(el.textContent);
+    const catalog = {};
+    for (const item of items) {
+      catalog[String(item.id)] = {
+        title: item.title,
+        mediaType: item.media_type,
+        durationSeconds: item.duration_seconds,
+        publishedAt: item.published_at,
+        size: item.file_size,
+        hasThumbnail: Boolean(item.thumbnail_key),
+      };
+    }
+    return catalog;
+  } catch {
+    return {};
+  }
+}
+
+function enrichMetaEntry(cached, catalogEntry) {
+  if (!catalogEntry) return cached;
+  const merged = { ...cached };
+  if (!merged.title && catalogEntry.title) merged.title = catalogEntry.title;
+  if (!merged.mediaType && catalogEntry.mediaType) merged.mediaType = catalogEntry.mediaType;
+  if (!merged.durationSeconds && catalogEntry.durationSeconds) {
+    merged.durationSeconds = catalogEntry.durationSeconds;
+  }
+  if (!merged.publishedAt && catalogEntry.publishedAt) merged.publishedAt = catalogEntry.publishedAt;
+  if (!merged.hasThumbnail && catalogEntry.hasThumbnail) merged.hasThumbnail = catalogEntry.hasThumbnail;
+  if (!merged.size && catalogEntry.size) merged.size = catalogEntry.size;
+  return merged;
+}
+
+function mergeMetaWithCatalog(meta, catalog) {
+  const enriched = {};
+  let changed = false;
+  for (const [id, info] of Object.entries(meta)) {
+    const merged = enrichMetaEntry(info, catalog[id]);
+    enriched[id] = merged;
+    if (JSON.stringify(merged) !== JSON.stringify(info)) changed = true;
+  }
+  return { meta: enriched, changed };
+}
+
+function mediaListItemHtml(id, info, { mode = 'online', saved = false } = {}) {
+  const mediaType = info.mediaType || '';
+  const hasThumbnail = info.hasThumbnail;
+  const thumb = hasThumbnail
+    ? `<img src="/thumbnail/${id}" alt="" class="thumb" loading="lazy">`
+    : `<div class="thumb thumb-placeholder">${(mediaType || 'm')[0].toUpperCase()}</div>`;
+  const typeBadge = mediaType
+    ? `<span class="media-type-badge media-type-${escapeHtml(mediaType)}">${escapeHtml(mediaType)}</span>`
+    : '';
+  const duration = info.durationSeconds ? formatDuration(info.durationSeconds) : '';
+  const durationHtml = duration ? `<span class="media-duration">${duration}</span>` : '';
+  const date = info.publishedAt ? formatPublishedDate(info.publishedAt) : '';
+  const dateHtml = date ? `<span class="media-date">${date}</span>` : '';
+  let actionBtn;
+  if (mode === 'offline') {
+    actionBtn = `<button type="button" class="btn-secondary btn-sm remove-offline-btn" data-media-id="${id}">Remove</button>`;
+  } else {
+    const saveLabel = saved ? 'Saved offline' : 'Save offline';
+    const saveClass = saved ? 'btn-secondary btn-sm save-offline-btn is-saved' : 'btn-secondary btn-sm save-offline-btn';
+    const saveDisabled = saved ? ' disabled' : '';
+    const dataAttrs = [
+      `data-media-id="${id}"`,
+      `data-title="${escapeHtml(info.title)}"`,
+      info.size ? `data-file-size="${info.size}"` : '',
+      mediaType ? `data-media-type="${escapeHtml(mediaType)}"` : '',
+      info.durationSeconds ? `data-duration="${info.durationSeconds}"` : '',
+      info.publishedAt ? `data-published-at="${info.publishedAt}"` : '',
+      hasThumbnail ? 'data-has-thumbnail="1"' : '',
+      'data-list="1"',
+    ].filter(Boolean).join(' ');
+    actionBtn = `<button type="button" class="${saveClass}" ${dataAttrs}${saveDisabled}>${saveLabel}</button>`;
+  }
+
+  return `
+    <li class="media-item">
+      <a href="/media/${id}" class="media-link">
+        ${thumb}
+        <div class="media-info">
+          <span class="media-title">${escapeHtml(info.title)}</span>
+          <span class="media-meta">
+            ${typeBadge}
+            ${durationHtml}
+            ${dateHtml}
+          </span>
+        </div>
+      </a>
+      ${actionBtn}
+    </li>
+  `;
+}
+
+async function refreshOfflinePage() {
+  if (document.getElementById('offline-list')) {
+    await QASOffline.renderOfflineList();
+  } else {
+    await QASOffline.renderStorageInfo();
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   QASOffline.setupOfflineBanner();
   QASOffline.bindButtons();
   QASOffline.setSaveButtonsReady(false);
   QASOffline.renderStorageInfo();
 
-  navigator.serviceWorker?.addEventListener('controllerchange', () => {
+  navigator.serviceWorker?.addEventListener('controllerchange', async () => {
     QASOffline.setSaveButtonsReady(!!QASOffline.getWorker());
+    await QASOffline.syncSavedButtons();
+  });
+
+  window.addEventListener('pageshow', async (event) => {
+    if (!event.persisted) return;
+    await QASOffline.syncSavedButtons();
+    await refreshOfflinePage();
   });
 
   const ready = await QASOffline.waitForWorker();
   QASOffline.setSaveButtonsReady(ready);
+  await QASOffline.syncSavedButtons();
+  await refreshOfflinePage();
 });
 
 window.QASOffline = QASOffline;

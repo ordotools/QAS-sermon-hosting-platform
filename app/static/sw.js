@@ -1,11 +1,11 @@
-const CACHE_SHELL = 'qas-shell-v7';
+const CACHE_SHELL = 'qas-shell-v8';
 const CACHE_MEDIA = 'qas-media-v1';
-const META_KEY = 'qas-offline-meta';
+const META_URL = '/__qas_offline_meta__';
 
 const SHELL_URLS = [
   '/offline',
   '/static/css/app.css',
-  '/static/js/pwa.js',
+  '/static/js/pwa.js?v=8',
   '/static/js/player.js',
   '/static/vendor/videojs/video.min.js',
   '/static/vendor/videojs/video-js.min.css',
@@ -69,12 +69,7 @@ self.addEventListener('fetch', (event) => {
 
 async function networkFirst(request) {
   try {
-    const response = await fetch(request);
-    if (response.ok) {
-      const cache = await caches.open(CACHE_SHELL);
-      cache.put(request, response.clone());
-    }
-    return response;
+    return await fetch(request);
   } catch {
     const cached = await caches.match(request);
     return cached || caches.match('/offline');
@@ -140,9 +135,9 @@ self.addEventListener('message', (event) => {
   const port = event.ports[0];
 
   if (type === 'CACHE_MEDIA') {
-    const { url, mediaId, title, size } = event.data;
+    const { url, mediaId, title, size, mediaType, durationSeconds, publishedAt, hasThumbnail } = event.data;
     event.waitUntil(
-      cacheMedia(url, mediaId, title, size)
+      cacheMedia(url, mediaId, title, size, { mediaType, durationSeconds, publishedAt, hasThumbnail })
         .then(() => port?.postMessage({ ok: true }))
         .catch((err) => port?.postMessage({ ok: false, error: err.message || 'Cache failed' }))
     );
@@ -156,10 +151,20 @@ self.addEventListener('message', (event) => {
         .then(() => port?.postMessage({ ok: true }))
         .catch((err) => port?.postMessage({ ok: false, error: err.message || 'Remove failed' }))
     );
+    return;
+  }
+
+  if (type === 'ENRICH_META') {
+    const { meta } = event.data;
+    event.waitUntil(
+      setMeta(meta)
+        .then(() => port?.postMessage({ ok: true }))
+        .catch((err) => port?.postMessage({ ok: false, error: err.message || 'Enrich failed' }))
+    );
   }
 });
 
-async function cacheMedia(url, mediaId, title, knownSize) {
+async function cacheMedia(url, mediaId, title, knownSize, extra = {}) {
   const cache = await caches.open(CACHE_MEDIA);
   const key = streamCacheKey(url);
   const response = await fetch(url);
@@ -168,7 +173,16 @@ async function cacheMedia(url, mediaId, title, knownSize) {
 
   const meta = await getMeta();
   const size = knownSize || parseInt(response.headers.get('Content-Length') || '0', 10);
-  meta[String(mediaId)] = { title, url, savedAt: Date.now(), size };
+  meta[String(mediaId)] = {
+    title,
+    url,
+    savedAt: Date.now(),
+    size,
+    mediaType: extra.mediaType || null,
+    durationSeconds: extra.durationSeconds || null,
+    publishedAt: extra.publishedAt || null,
+    hasThumbnail: Boolean(extra.hasThumbnail),
+  };
   await setMeta(meta);
 }
 
@@ -183,7 +197,7 @@ async function removeMedia(mediaId, url) {
 async function getMeta() {
   try {
     const cache = await caches.open(CACHE_MEDIA);
-    const res = await cache.match(META_KEY);
+    const res = await cache.match(META_URL);
     if (!res) return {};
     return await res.json();
   } catch {
@@ -193,7 +207,7 @@ async function getMeta() {
 
 async function setMeta(meta) {
   const cache = await caches.open(CACHE_MEDIA);
-  await cache.put(META_KEY, new Response(JSON.stringify(meta), {
+  await cache.put(META_URL, new Response(JSON.stringify(meta), {
     headers: { 'Content-Type': 'application/json' },
   }));
 }

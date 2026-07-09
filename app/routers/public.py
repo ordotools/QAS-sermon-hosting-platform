@@ -1,3 +1,4 @@
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -70,10 +71,24 @@ async def delete_own_media(
 @router.get("/offline", response_class=HTMLResponse)
 async def offline_page(
     request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
     user: User | None = Depends(get_current_user_optional),
 ):
+    items = await list_media(session, ready_only=True)
+    catalog = [
+        {
+            "id": item.id,
+            "title": item.title,
+            "media_type": item.media_type.value,
+            "duration_seconds": item.duration_seconds,
+            "published_at": item.published_at.isoformat() if item.published_at else None,
+            "file_size": item.file_size,
+            "thumbnail_key": item.thumbnail_key,
+        }
+        for item in items
+    ]
     return templates.TemplateResponse(
         request,
         "offline.html",
-        template_context(request, user),
+        {**template_context(request, user), "catalog_json": json.dumps(catalog)},
     )

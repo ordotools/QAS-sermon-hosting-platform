@@ -23,7 +23,7 @@
         </span>
       </div>
     </a>
-    <button type="button" class="btn-secondary btn-sm save-offline-btn" data-media-id="{{ item.id }}" data-title="{{ item.title }}" data-file-size="{{ item.file_size }}">
+    <button type="button" class="btn-secondary btn-sm save-offline-btn" data-list="1" data-media-id="{{ item.id }}" data-title="{{ item.title }}" data-file-size="{{ item.file_size }}" data-media-type="{{ item.media_type.value }}" data-duration="{{ item.duration_seconds or '' }}" data-published-at="{{ item.published_at.isoformat() }}" data-has-thumbnail="{{ '1' if item.thumbnail_key else '' }}">
       Save offline
     </button>
   </li>

@@ -4,8 +4,8 @@
 <link rel="stylesheet" href="/static/vendor/videojs/video-js.min.css">
 {% endblock %}
 {% block content %}
+<a href="/" class="back-to-media-btn" aria-label="Back to Media"><span aria-hidden="true">←</span></a>
 <article class="player-page">
-  <a href="/" class="back-link">← Back to Media</a>
   <h1 class="page-title">{{ item.title }}</h1>
   {% if item.description %}<p class="description">{{ item.description }}</p>{% endif %}
   <p class="meta">
@@ -30,7 +30,7 @@
   </div>
 
   <div class="player-actions">
-    <button type="button" class="btn-primary save-offline-btn" data-media-id="{{ item.id }}" data-title="{{ item.title }}" data-file-size="{{ item.file_size }}">
+    <button type="button" class="btn-primary save-offline-btn" data-media-id="{{ item.id }}" data-title="{{ item.title }}" data-file-size="{{ item.file_size }}" data-media-type="{{ item.media_type.value }}" data-duration="{{ item.duration_seconds or '' }}" data-published-at="{{ item.published_at.isoformat() }}" data-has-thumbnail="{{ '1' if item.thumbnail_key else '' }}">
       Save for offline
     </button>
     <button type="button" class="btn-secondary remove-offline-btn hidden" data-media-id="{{ item.id }}">
