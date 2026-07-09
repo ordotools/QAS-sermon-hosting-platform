@@ -37,7 +37,7 @@ async def _recent_uploads(session: AsyncSession, user_id: int) -> list[MediaItem
     result = await session.execute(
         select(MediaItem)
         .where(MediaItem.uploaded_by_id == user_id)
-        .order_by(MediaItem.created_at.desc())
+        .order_by(MediaItem.published_at.desc())
         .limit(10)
     )
     return list(result.scalars().all())

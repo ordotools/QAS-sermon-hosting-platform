@@ -2,7 +2,11 @@
   const form = document.getElementById('upload-form');
   if (!form) return;
 
-  const fileInput = form.querySelector('input[type="file"]');
+  const fileInput = document.getElementById('upload-file');
+  const dropZone = document.getElementById('upload-drop-zone');
+  const filenameEl = document.getElementById('upload-filename');
+  const promptEl = dropZone?.querySelector('.drop-zone-prompt');
+  const hintEl = dropZone?.querySelector('.drop-zone-hint');
   const submitBtn = document.getElementById('upload-submit');
   const progressWrap = document.getElementById('upload-progress');
   const progressBar = document.getElementById('upload-progress-bar');
@@ -47,12 +51,30 @@
     }
   }
 
+  function clearFilenameDisplay() {
+    if (filenameEl) {
+      filenameEl.textContent = '';
+      hide(filenameEl);
+    }
+    show(promptEl);
+    show(hintEl);
+  }
+
+  function showFilename(name) {
+    if (!filenameEl) return;
+    filenameEl.textContent = name;
+    show(filenameEl);
+    hide(promptEl);
+    hide(hintEl);
+  }
+
   function setUploading(active) {
     if (submitBtn) {
       submitBtn.disabled = active;
       submitBtn.classList.toggle('is-disabled', active);
     }
     if (fileInput) fileInput.disabled = active;
+    dropZone?.classList.toggle('is-disabled', active);
   }
 
   function resetProgress() {
@@ -82,6 +104,27 @@
     return null;
   }
 
+  function assignFile(file) {
+    if (!fileInput || !file) return;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    fileInput.files = dt.files;
+  }
+
+  function handleFileSelected(file) {
+    if (!file) {
+      clearFilenameDisplay();
+      return;
+    }
+    showFilename(file.name);
+    const fileError = validateFile(file);
+    if (fileError) {
+      setError(fileError);
+    } else {
+      setError('');
+    }
+  }
+
   function refreshUploadStatus() {
     if (!statusEl || typeof htmx === 'undefined') return;
     show(statusSection);
@@ -94,6 +137,7 @@
     setError('');
     setMessage('Upload complete — processing…');
     if (fileInput) fileInput.value = '';
+    clearFilenameDisplay();
     refreshUploadStatus();
     activeXhr = null;
   }
@@ -105,6 +149,33 @@
     setError(msg || 'Upload failed. Please try again.');
     activeXhr = null;
   }
+
+  fileInput?.addEventListener('change', () => {
+    handleFileSelected(fileInput.files?.[0] || null);
+  });
+
+  dropZone?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+
+  dropZone?.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+
+  dropZone?.addEventListener('dragleave', () => {
+    dropZone.classList.remove('drag-over');
+  });
+
+  dropZone?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    assignFile(file);
+    handleFileSelected(file);
+  });
 
   cancelBtn?.addEventListener('click', () => {
     if (activeXhr) activeXhr.abort();

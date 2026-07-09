@@ -1,11 +1,11 @@
-const CACHE_SHELL = 'qas-shell-v8';
+const CACHE_SHELL = 'qas-shell-v9';
 const CACHE_MEDIA = 'qas-media-v1';
 const META_URL = '/__qas_offline_meta__';
 
 const SHELL_URLS = [
   '/offline',
   '/static/css/app.css',
-  '/static/js/pwa.js?v=8',
+  '/static/js/pwa.js?v=9',
   '/static/js/player.js',
   '/static/vendor/videojs/video.min.js',
   '/static/vendor/videojs/video-js.min.css',
@@ -44,12 +44,12 @@ self.addEventListener('fetch', (event) => {
 
   if (request.method !== 'GET') return;
 
-  if (url.pathname === '/' || url.pathname.startsWith('/media/')) {
+  if (url.pathname === '/' || url.pathname.startsWith('/media/') || url.pathname === '/offline') {
     event.respondWith(networkFirst(request));
     return;
   }
 
-  if (url.pathname.startsWith('/static/') || url.pathname === '/offline') {
+  if (url.pathname.startsWith('/static/')) {
     event.respondWith(
       caches.match(request).then((cached) => cached || fetch(request).then((res) => {
         if (res.ok) {

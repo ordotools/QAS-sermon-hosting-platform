@@ -68,14 +68,9 @@ async def delete_own_media(
     return RedirectResponse("/", status_code=303)
 
 
-@router.get("/offline", response_class=HTMLResponse)
-async def offline_page(
-    request: Request,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: User | None = Depends(get_current_user_optional),
-):
+async def _offline_catalog(session: AsyncSession) -> list[dict]:
     items = await list_media(session, ready_only=True)
-    catalog = [
+    return [
         {
             "id": item.id,
             "title": item.title,
@@ -87,6 +82,23 @@ async def offline_page(
         }
         for item in items
     ]
+
+
+@router.get("/offline/catalog.json")
+async def offline_catalog_json(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: User | None = Depends(get_current_user_optional),
+):
+    return await _offline_catalog(session)
+
+
+@router.get("/offline", response_class=HTMLResponse)
+async def offline_page(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: User | None = Depends(get_current_user_optional),
+):
+    catalog = await _offline_catalog(session)
     return templates.TemplateResponse(
         request,
         "offline.html",

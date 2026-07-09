@@ -221,20 +221,18 @@ const QASOffline = {
     const empty = document.getElementById('offline-empty');
     if (!list) return;
 
+    const catalog = await loadMediaCatalog();
     let meta = await this.getMeta();
-    const { meta: enriched, changed } = mergeMetaWithCatalog(meta, getMediaCatalog());
-    if (changed) {
-      meta = enriched;
-      if (navigator.onLine && this.getWorker()) {
-        try {
-          await this.postToSW({ type: 'ENRICH_META', meta: enriched }, 10000);
-        } catch (e) {
-          console.warn('Could not persist enriched offline meta', e);
-        }
-      }
-    }
+    const { meta: enriched, changed } = mergeMetaWithCatalog(meta, catalog);
+    meta = enriched;
 
     const entries = Object.entries(meta);
+    entries.sort(([idA, a], [idB, b]) => {
+      const da = publishedAtMs(idA, a, catalog);
+      const db = publishedAtMs(idB, b, catalog);
+      if (db !== da) return db - da;
+      return Number(idB) - Number(idA);
+    });
     list.innerHTML = '';
 
     if (!entries.length) {
@@ -249,6 +247,7 @@ const QASOffline = {
     }
     this.bindButtons();
     this.renderStorageInfo();
+    void persistEnrichedMeta(enriched, changed);
   },
 
   setupOfflineBanner() {
@@ -306,25 +305,57 @@ function formatPublishedDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function getMediaCatalog() {
+function catalogFromItems(items) {
+  const catalog = {};
+  for (const item of items) {
+    catalog[String(item.id)] = {
+      title: item.title,
+      mediaType: item.media_type,
+      durationSeconds: item.duration_seconds,
+      publishedAt: item.published_at,
+      size: item.file_size,
+      hasThumbnail: Boolean(item.thumbnail_key),
+    };
+  }
+  return catalog;
+}
+
+function getEmbeddedMediaCatalog() {
   const el = document.getElementById('media-catalog');
   if (!el) return {};
   try {
-    const items = JSON.parse(el.textContent);
-    const catalog = {};
-    for (const item of items) {
-      catalog[String(item.id)] = {
-        title: item.title,
-        mediaType: item.media_type,
-        durationSeconds: item.duration_seconds,
-        publishedAt: item.published_at,
-        size: item.file_size,
-        hasThumbnail: Boolean(item.thumbnail_key),
-      };
-    }
-    return catalog;
+    return catalogFromItems(JSON.parse(el.textContent));
   } catch {
     return {};
+  }
+}
+
+async function loadMediaCatalog() {
+  const embedded = getEmbeddedMediaCatalog();
+  if (!navigator.onLine) return embedded;
+  try {
+    const res = await fetch('/offline/catalog.json', { cache: 'no-store', credentials: 'same-origin' });
+    if (!res.ok) return embedded;
+    const items = await res.json();
+    return { ...embedded, ...catalogFromItems(items) };
+  } catch {
+    return embedded;
+  }
+}
+
+function publishedAtMs(id, info, catalog) {
+  const raw = info.publishedAt || catalog[String(id)]?.publishedAt;
+  if (!raw) return 0;
+  const t = new Date(raw).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+async function persistEnrichedMeta(enriched, changed) {
+  if (!changed || !navigator.onLine || !QASOffline.getWorker()) return;
+  try {
+    await QASOffline.postToSW({ type: 'ENRICH_META', meta: enriched }, 10000);
+  } catch (e) {
+    console.warn('Could not persist enriched offline meta', e);
   }
 }
 
@@ -423,8 +454,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await QASOffline.syncSavedButtons();
   });
 
-  window.addEventListener('pageshow', async (event) => {
-    if (!event.persisted) return;
+  window.addEventListener('pageshow', async () => {
     await QASOffline.syncSavedButtons();
     await refreshOfflinePage();
   });

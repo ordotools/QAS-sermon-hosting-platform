@@ -13,13 +13,19 @@
     <textarea name="description" rows="3"></textarea>
   </label>
   <label>
-    Published date
+    Published date (optional)
     <input type="datetime-local" name="published_at">
+    <span class="hint">Defaults to upload time when left blank.</span>
   </label>
-  <label>
-    Media file
-    <input type="file" name="file" required accept=".mp4,.mov,.m4a,.mp3,.webm,.ogg,audio/*,video/*">
-  </label>
+  <div class="drop-zone" id="upload-drop-zone">
+    <input type="file" id="upload-file" name="file" class="sr-only" required
+           accept=".mp4,.mov,.m4a,.mp3,.webm,.ogg,audio/*,video/*">
+    <label for="upload-file" class="drop-zone-label">
+      <span class="drop-zone-prompt">Drop file here or click to browse</span>
+      <span class="drop-zone-hint">mp4, mov, m4a, mp3, webm, ogg</span>
+      <span class="drop-zone-filename hidden" id="upload-filename" aria-live="polite"></span>
+    </label>
+  </div>
   <p class="hint upload-hint">iPhone video (.mov) and voice memos (.m4a) are supported; files are converted automatically for web playback.</p>
   <div id="upload-progress" class="upload-progress hidden" aria-live="polite">
     <progress id="upload-progress-bar" max="100" aria-label="Upload progress">0</progress>
