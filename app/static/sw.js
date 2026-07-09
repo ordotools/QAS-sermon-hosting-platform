@@ -1,4 +1,4 @@
-const CACHE_SHELL = 'qas-shell-v5';
+const CACHE_SHELL = 'qas-shell-v7';
 const CACHE_MEDIA = 'qas-media-v1';
 const META_KEY = 'qas-offline-meta';
 
@@ -108,6 +108,10 @@ async function serveRangeFromCached(response, rangeHeader) {
 }
 
 async function cacheFirstStream(request) {
+  if (request.method !== 'GET') {
+    return fetch(request);
+  }
+
   const cache = await caches.open(CACHE_MEDIA);
   const key = streamCacheKey(request.url);
   const cached = await cache.match(key);
@@ -136,9 +140,9 @@ self.addEventListener('message', (event) => {
   const port = event.ports[0];
 
   if (type === 'CACHE_MEDIA') {
-    const { url, mediaId, title } = event.data;
+    const { url, mediaId, title, size } = event.data;
     event.waitUntil(
-      cacheMedia(url, mediaId, title)
+      cacheMedia(url, mediaId, title, size)
         .then(() => port?.postMessage({ ok: true }))
         .catch((err) => port?.postMessage({ ok: false, error: err.message || 'Cache failed' }))
     );
@@ -155,7 +159,7 @@ self.addEventListener('message', (event) => {
   }
 });
 
-async function cacheMedia(url, mediaId, title) {
+async function cacheMedia(url, mediaId, title, knownSize) {
   const cache = await caches.open(CACHE_MEDIA);
   const key = streamCacheKey(url);
   const response = await fetch(url);
@@ -163,7 +167,7 @@ async function cacheMedia(url, mediaId, title) {
   await cache.put(key, response.clone());
 
   const meta = await getMeta();
-  const size = parseInt(response.headers.get('Content-Length') || '0', 10);
+  const size = knownSize || parseInt(response.headers.get('Content-Length') || '0', 10);
   meta[String(mediaId)] = { title, url, savedAt: Date.now(), size };
   await setMeta(meta);
 }

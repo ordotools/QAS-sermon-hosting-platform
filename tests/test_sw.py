@@ -20,7 +20,7 @@ def _read_sw() -> str:
 
 def test_sw_precaches_videojs_and_player():
     sw = _read_sw()
-    assert "qas-shell-v5" in sw
+    assert "qas-shell-v7" in sw
     for url in VIDEOJS_SHELL_PATHS:
         assert url in sw, f"missing from SHELL_URLS: {url}"
         static_path = REPO_ROOT / "app" / url.lstrip("/")
@@ -39,7 +39,7 @@ async def test_sw_shell_assets_served(client):
 async def test_sw_js_served(client):
     r = await client.get("/sw.js")
     assert r.status_code == 200
-    assert "qas-shell-v5" in r.text
+    assert "qas-shell-v7" in r.text
     for url in VIDEOJS_SHELL_PATHS:
         assert url in r.text
 

@@ -1,14 +1,25 @@
 const META_KEY = 'qas-offline-meta';
 const CACHE_MEDIA = 'qas-media-v1';
 const QUOTA_MARGIN = 0.9;
+const SAVE_TIMEOUT_MS = 5 * 60 * 1000;
 
 const QASOffline = {
-  async registerSW() {
-    if (!('serviceWorker' in navigator)) return;
+  swReady: false,
+  registration: null,
+
+  getWorker() {
+    return navigator.serviceWorker?.controller || this.registration?.active || null;
+  },
+
+  async waitForWorker() {
+    if (!('serviceWorker' in navigator)) return false;
     try {
-      await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      this.registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      await navigator.serviceWorker.ready;
+      return !!this.registration?.active;
     } catch (e) {
       console.warn('SW registration failed', e);
+      return false;
     }
   },
 
@@ -28,12 +39,6 @@ const QASOffline = {
     return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   },
 
-  async getFileSize(url) {
-    const res = await fetch(url, { method: 'HEAD' });
-    if (!res.ok) throw new Error('Could not read file size');
-    return parseInt(res.headers.get('Content-Length') || '0', 10);
-  },
-
   async checkStorageQuota(additionalBytes) {
     if (!navigator.storage?.estimate) return { ok: true };
     const { usage = 0, quota = 0 } = await navigator.storage.estimate();
@@ -50,25 +55,29 @@ const QASOffline = {
     return { ok: true, usage, quota };
   },
 
-  postToSW(message) {
+  postToSW(message, timeoutMs = SAVE_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
-      const controller = navigator.serviceWorker?.controller;
-      if (!controller) {
-        reject(new Error('Service worker not ready'));
+      const worker = this.getWorker();
+      if (!worker) {
+        reject(new Error('Service worker not ready. Refresh and try again.'));
         return;
       }
       const channel = new MessageChannel();
+      const timer = setTimeout(() => {
+        reject(new Error('Save timed out. Try again on a stable connection.'));
+      }, timeoutMs);
       channel.port1.onmessage = (event) => {
+        clearTimeout(timer);
         if (event.data?.ok) resolve(event.data);
         else reject(new Error(event.data?.error || 'Operation failed'));
       };
-      controller.postMessage(message, [channel.port2]);
+      worker.postMessage(message, [channel.port2]);
     });
   },
 
   async saveMedia(mediaId, title, btn) {
-    if (!navigator.serviceWorker?.controller) {
-      alert('Service worker not ready. Refresh and try again.');
+    if (!this.getWorker()) {
+      alert('Offline save is still loading. Wait a moment and try again.');
       return;
     }
     if (btn) {
@@ -76,8 +85,11 @@ const QASOffline = {
       btn.textContent = 'Saving…';
     }
     try {
-      const url = this.streamUrl(mediaId);
-      const fileSize = await this.getFileSize(url);
+      const fileSize = parseInt(btn?.dataset.fileSize || '0', 10);
+      if (!fileSize) {
+        throw new Error('File size unknown. Refresh the page and try again.');
+      }
+
       const quotaCheck = await this.checkStorageQuota(fileSize);
       if (!quotaCheck.ok) {
         alert(quotaCheck.message);
@@ -88,7 +100,8 @@ const QASOffline = {
         return;
       }
 
-      await this.postToSW({ type: 'CACHE_MEDIA', url, mediaId, title });
+      const url = this.streamUrl(mediaId);
+      await this.postToSW({ type: 'CACHE_MEDIA', url, mediaId, title, size: fileSize });
       if (btn) btn.textContent = 'Saved';
       await this.updatePlayerButtons(mediaId);
       this.renderStorageInfo();
@@ -104,7 +117,7 @@ const QASOffline = {
   async removeMedia(mediaId) {
     const url = this.streamUrl(mediaId);
     try {
-      if (navigator.serviceWorker?.controller) {
+      if (this.getWorker()) {
         await this.postToSW({ type: 'REMOVE_MEDIA', mediaId, url });
       }
       await this.updatePlayerButtons(mediaId);
@@ -128,17 +141,35 @@ const QASOffline = {
     return Boolean(meta[String(mediaId)]);
   },
 
+  setSaveButtonsReady(ready) {
+    this.swReady = ready;
+    const hint = ready ? '' : 'Offline save loading…';
+    const status = document.getElementById('offline-status');
+    if (status && !status.textContent.includes('Available offline')) {
+      status.textContent = hint;
+    }
+    document.querySelectorAll('.save-offline-btn').forEach((btn) => {
+      if (btn.textContent === 'Saved offline' || btn.textContent === 'Saved') return;
+      btn.disabled = !ready;
+      btn.textContent = ready
+        ? (btn.dataset.list ? 'Save offline' : 'Save for offline')
+        : 'Loading…';
+      btn.title = ready ? '' : hint;
+    });
+  },
+
   async updatePlayerButtons(mediaId) {
     const saved = await this.isSaved(mediaId);
     document.querySelectorAll(`.save-offline-btn[data-media-id="${mediaId}"]`).forEach((btn) => {
       btn.textContent = saved ? 'Saved offline' : (btn.dataset.list ? 'Save offline' : 'Save for offline');
-      btn.disabled = saved;
+      btn.disabled = saved || !this.swReady;
+      btn.title = (!this.swReady && !saved) ? 'Offline save loading…' : '';
     });
     document.querySelectorAll(`.remove-offline-btn[data-media-id="${mediaId}"]`).forEach((btn) => {
       btn.classList.toggle('hidden', !saved);
     });
     const status = document.getElementById('offline-status');
-    if (status) status.textContent = saved ? 'Available offline' : '';
+    if (status) status.textContent = saved ? 'Available offline' : (this.swReady ? '' : 'Offline save loading…');
   },
 
   async renderStorageInfo() {
@@ -222,11 +253,18 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  QASOffline.registerSW();
+document.addEventListener('DOMContentLoaded', async () => {
   QASOffline.setupOfflineBanner();
   QASOffline.bindButtons();
+  QASOffline.setSaveButtonsReady(false);
   QASOffline.renderStorageInfo();
+
+  navigator.serviceWorker?.addEventListener('controllerchange', () => {
+    QASOffline.setSaveButtonsReady(!!QASOffline.getWorker());
+  });
+
+  const ready = await QASOffline.waitForWorker();
+  QASOffline.setSaveButtonsReady(ready);
 });
 
 window.QASOffline = QASOffline;
