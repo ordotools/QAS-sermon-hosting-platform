@@ -44,10 +44,12 @@ async def player_page(
             status_code=404,
         )
 
+    back_url = "/admin?tab=media" if request.query_params.get("from") == "admin" else "/"
+
     return templates.TemplateResponse(
         request,
         "player.html",
-        {**template_context(request, user), "item": item},
+        {**template_context(request, user), "item": item, "back_url": back_url},
     )
 
 

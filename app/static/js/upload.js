@@ -20,6 +20,7 @@
   const ALLOWED_EXT = ['.mp4', '.mov', '.m4a', '.mp3', '.webm', '.ogg'];
 
   let activeXhr = null;
+  let pendingMediaId = null;
 
   function show(el) {
     el?.classList.remove('hidden');
@@ -131,10 +132,19 @@
     htmx.ajax('GET', '/upload/status', { target: '#upload-status', swap: 'innerHTML' });
   }
 
-  function handleSuccess() {
+  function clearPendingIfReady(statusRoot) {
+    if (!pendingMediaId || !statusRoot) return;
+    const row = statusRoot.querySelector(`[data-media-id="${pendingMediaId}"]`);
+    if (!row || row.querySelector('.badge-processing')) return;
+    setMessage('');
+    pendingMediaId = null;
+  }
+
+  function handleSuccess(mediaId) {
     resetProgress();
     setUploading(false);
     setError('');
+    pendingMediaId = mediaId ?? null;
     setMessage('Upload complete — processing…');
     if (fileInput) fileInput.value = '';
     clearFilenameDisplay();
@@ -187,6 +197,7 @@
 
     setError('');
     setMessage('');
+    pendingMediaId = null;
 
     const file = fileInput?.files?.[0];
     if (!file) {
@@ -229,7 +240,7 @@
       }
 
       if (xhr.status >= 200 && xhr.status < 300 && data?.ok) {
-        handleSuccess();
+        handleSuccess(data.media_id);
         return;
       }
 
@@ -244,5 +255,11 @@
     xhr.onabort = () => handleFailure('Upload cancelled.');
 
     xhr.send(formData);
+  });
+
+  document.body.addEventListener('htmx:afterSwap', (event) => {
+    const target = event.detail?.target;
+    if (!target || target.id !== 'upload-status') return;
+    clearPendingIfReady(target);
   });
 })();

@@ -4,7 +4,7 @@
 <link rel="stylesheet" href="/static/vendor/videojs/video-js.min.css">
 {% endblock %}
 {% block content %}
-<a href="/" class="back-to-media-btn" aria-label="Back to Media"><span aria-hidden="true">←</span></a>
+<a href="{{ back_url }}" class="back-to-media-btn" aria-label="Back to Media"><span aria-hidden="true">←</span></a>
 <article class="player-page">
   <h1 class="page-title">{{ item.title }}</h1>
   {% if item.description %}<p class="description">{{ item.description }}</p>{% endif %}

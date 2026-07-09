@@ -1,0 +1,55 @@
+{% if items %}
+<ul class="media-list">
+  {% for item in items %}
+  <li class="media-item">
+    {% if mode == 'admin' %}
+    <div class="media-link">
+      {% if item.thumbnail_key %}
+      <img src="/thumbnail/{{ item.id }}" alt="" class="thumb" loading="lazy">
+      {% else %}
+      <div class="thumb thumb-placeholder">{{ item.media_type.value[0]|upper }}</div>
+      {% endif %}
+      <div class="media-info">
+        <span class="media-title">{{ item.title }}</span>
+        <span class="media-meta">
+          <span class="badge badge-{{ item.status.value }}">{{ item.status.value }}</span>
+          <span class="media-type-badge media-type-{{ item.media_type.value }}">{{ item.media_type.value }}</span>
+          {% if item.duration_seconds %}
+          <span class="media-duration">{{ item.duration_seconds | format_duration }}</span>
+          {% endif %}
+          <span class="media-date">{{ item.published_at.strftime('%b %d, %Y') }}</span>
+        </span>
+      </div>
+    </div>
+    <a href="/media/{{ item.id }}?from=admin" class="btn-secondary btn-sm">View</a>
+    <form action="/admin/media/{{ item.id }}/delete" method="post" class="inline-form" onsubmit="return confirm('Delete media?')">
+      <button type="submit" class="btn-danger btn-sm">Remove</button>
+    </form>
+    {% else %}
+    <a href="/media/{{ item.id }}" class="media-link">
+      {% if item.thumbnail_key %}
+      <img src="/thumbnail/{{ item.id }}" alt="" class="thumb" loading="lazy">
+      {% else %}
+      <div class="thumb thumb-placeholder">{{ item.media_type.value[0]|upper }}</div>
+      {% endif %}
+      <div class="media-info">
+        <span class="media-title">{{ item.title }}</span>
+        <span class="media-meta">
+          <span class="media-type-badge media-type-{{ item.media_type.value }}">{{ item.media_type.value }}</span>
+          {% if item.duration_seconds %}
+          <span class="media-duration">{{ item.duration_seconds | format_duration }}</span>
+          {% endif %}
+          <span class="media-date">{{ item.published_at.strftime('%b %d, %Y') }}</span>
+        </span>
+      </div>
+    </a>
+    <button type="button" class="btn-secondary btn-sm save-offline-btn" data-list="1" data-media-id="{{ item.id }}" data-title="{{ item.title }}" data-file-size="{{ item.file_size }}" data-media-type="{{ item.media_type.value }}" data-duration="{{ item.duration_seconds or '' }}" data-published-at="{{ item.published_at.isoformat() }}" data-has-thumbnail="{{ '1' if item.thumbnail_key else '' }}">
+      Save offline
+    </button>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No media yet.</p>
+{% endif %}
