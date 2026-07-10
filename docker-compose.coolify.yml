@@ -1,0 +1,50 @@
+# Coolify Path A: app only — PostgreSQL is a separate Coolify database resource.
+#
+# Setup:
+# 1. Same project/env: create PostgreSQL (Coolify → + New → Database → PostgreSQL).
+# 2. Copy the internal connection string from the database page.
+#    Rewrite as postgresql+asyncpg://USER:PASS@HOST:5432/DB  (must use asyncpg driver).
+#    Use the hostname shown on the database resource (often the container UUID).
+# 3. Deploy this stack: Build pack = Docker Compose, file = docker-compose.coolify.yml.
+# 4. Service stack → enable "Connect to Predefined Network" → redeploy.
+#    Required so this stack can reach the Coolify-managed Postgres on the shared network.
+# 5. Set env vars below in Coolify (only ${VAR} names listed here are injected).
+# 6. Add a domain + HTTPS (required for PWA / service worker).
+#
+# Do not add host ports — Coolify routes traffic via Traefik/Caddy.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/data/media
+      SUPERUSER_EMAIL: ${SUPERUSER_EMAIL}
+      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD}
+      DEBUG: ${DEBUG:-false}
+      B2_KEY_ID: ${B2_KEY_ID:-}
+      B2_APP_KEY: ${B2_APP_KEY:-}
+      B2_BUCKET: ${B2_BUCKET:-}
+      B2_ENDPOINT: ${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-500}
+      SESSION_MAX_AGE: ${SESSION_MAX_AGE:-604800}
+    volumes:
+      - media_data:/app/data/media
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  media_data:

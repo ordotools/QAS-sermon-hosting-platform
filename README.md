@@ -75,6 +75,19 @@ Uses PostgreSQL + local volume storage by default. Set `STORAGE_BACKEND=b2` for 
 
 On startup the container runs `alembic upgrade head` before uvicorn (see `scripts/entrypoint.sh`).
 
+## Coolify (Path A)
+
+Deploy the app with a **separate** Coolify PostgreSQL database:
+
+1. Create PostgreSQL in the same Coolify project/environment.
+2. New resource → **Docker Compose** → set compose file to `docker-compose.coolify.yml`.
+3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
+4. Set `DATABASE_URL` to the internal Postgres URL using the `postgresql+asyncpg://` driver (copy from the database page and swap the scheme).
+5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
+6. Add a domain with HTTPS (required for the PWA).
+
+Media files persist on the `media_data` volume. Use `STORAGE_BACKEND=b2` to store uploads in Backblaze instead.
+
 ## Backblaze B2 setup
 
 1. Create a **private** bucket in Backblaze B2
