@@ -2,9 +2,8 @@
 #
 # Setup:
 # 1. Same project/env: create PostgreSQL (Coolify → + New → Database → PostgreSQL).
-# 2. Copy the internal connection string from the database page.
-#    Rewrite as postgresql+asyncpg://USER:PASS@HOST:5432/DB  (must use asyncpg driver).
-#    Use the hostname shown on the database resource (often the container UUID).
+# 2. Copy the internal connection string from the database page and set DATABASE_URL
+#    as-is (postgres://...). The app rewrites it for SQLAlchemy/Alembic automatically.
 # 3. Deploy this stack: Build pack = Docker Compose, file = docker-compose.coolify.yml.
 # 4. Service stack → enable "Connect to Predefined Network" → redeploy.
 #    Required so this stack can reach the Coolify-managed Postgres on the shared network.

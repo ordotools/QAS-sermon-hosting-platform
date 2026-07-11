@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.db_url import normalize_async_database_url
 
 
 class Settings(BaseSettings):
@@ -8,6 +11,11 @@ class Settings(BaseSettings):
 
     secret_key: str = "dev-secret-change-me"
     database_url: str = "sqlite+aiosqlite:///./data/app.db"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        return normalize_async_database_url(value)
     storage_backend: str = "local"
     local_storage_path: str = "./data/media"
     b2_key_id: str = ""

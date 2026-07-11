@@ -82,7 +82,7 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
 1. Create PostgreSQL in the same Coolify project/environment.
 2. New resource → **Docker Compose** → set compose file to `docker-compose.coolify.yml`.
 3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
-4. Set `DATABASE_URL` to the internal Postgres URL using the `postgresql+asyncpg://` driver (copy from the database page and swap the scheme).
+4. Set `DATABASE_URL` to the **internal** Postgres URL from the database page as-is (`postgres://...`). The app normalizes it automatically.
 5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
 6. Add a domain with HTTPS (required for the PWA).
 

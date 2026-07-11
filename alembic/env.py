@@ -5,6 +5,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
+from app.db_url import normalize_sync_database_url
 from app.models import Invite, MediaItem, User  # noqa: F401
 
 config = context.config
@@ -17,10 +18,7 @@ target_metadata = SQLModel.metadata
 def _sync_database_url() -> str:
     url = os.environ.get("DATABASE_URL", "")
     if url:
-        return (
-            url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            .replace("sqlite+aiosqlite://", "sqlite://")
-        )
+        return normalize_sync_database_url(url)
     return config.get_main_option("sqlalchemy.url")
 
 
