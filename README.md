@@ -84,9 +84,27 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
 3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
 4. Set `DATABASE_URL` to the **internal** Postgres URL from the database page as-is (`postgres://...`). The app normalizes it automatically.
 5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
-6. Add a domain with HTTPS (required for the PWA).
+6. On the `app` service, set **Domains** to `https://<your-domain>:8000` (required for the PWA). The `:8000` tells Coolify’s proxy the container port; visitors still use 443. Point DNS A/CNAME at the Coolify server, then redeploy. Compose includes `SERVICE_URL_APP_8000` so Coolify can generate/register the URL and fill **Links**.
 
 Media files persist on the `media_data` volume. Use `STORAGE_BACKEND=b2` to store uploads in Backblaze instead.
+
+### Troubleshooting: Links empty / cannot open the site
+
+Coolify **Links** only lists domains attached to the service. Empty Links means no FQDN is configured, so the proxy has nothing to route.
+
+1. Set **Domains** on `app` to `https://<your-domain>:8000` (include `:8000`), or redeploy after `SERVICE_URL_APP_8000` is in the compose file.
+2. Confirm DNS points at the Coolify server.
+3. Redeploy (domain/label changes need a redeploy).
+
+### Troubleshooting: `failed to resolve host '…': Temporary failure in name resolution`
+
+Alembic/SQLAlchemy received `DATABASE_URL`, but Docker DNS cannot resolve the Coolify Postgres container id (the host in the internal URL). The app compose stack is isolated from the DB network.
+
+1. Confirm the Postgres resource is **running** and in the **same** project/environment (and Destination) as the app.
+2. On the app Docker Compose resource, enable **Connect to Predefined Network**.
+3. **Redeploy** the app (restart alone may not attach the shared network).
+4. Keep `DATABASE_URL` as the **internal** URL from the database page (`postgres://…@<container-id>:…`), not a public host/IP.
+5. Optional: in the Coolify terminal for the app, run `getent hosts <container-id>` — it must resolve before `alembic upgrade head` can succeed.
 
 ## Backblaze B2 setup
 

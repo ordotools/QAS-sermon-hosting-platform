@@ -8,7 +8,9 @@
 # 4. Service stack → enable "Connect to Predefined Network" → redeploy.
 #    Required so this stack can reach the Coolify-managed Postgres on the shared network.
 # 5. Set env vars below in Coolify (only ${VAR} names listed here are injected).
-# 6. Add a domain + HTTPS (required for PWA / service worker).
+# 6. Domains for `app`: https://your.domain:8000 (HTTPS required for PWA).
+#    The :8000 suffix is the container port hint for Coolify’s proxy (public still 443).
+#    SERVICE_URL_APP_8000 below makes Coolify register that route / populate Links.
 #
 # Do not add host ports — Coolify routes traffic via Traefik/Caddy.
 
@@ -19,6 +21,7 @@ services:
     expose:
       - "8000"
     environment:
+      SERVICE_URL_APP_8000: ${SERVICE_URL_APP_8000}
       DATABASE_URL: ${DATABASE_URL}
       SECRET_KEY: ${SECRET_KEY}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
