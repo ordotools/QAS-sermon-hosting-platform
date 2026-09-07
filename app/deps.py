@@ -1,8 +1,9 @@
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from fastapi import Cookie, Depends, HTTPException, Request, status
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import Response
 
 from app.config import get_settings
 from app.database import get_session
@@ -10,6 +11,47 @@ from app.models import User, UserRole
 from app.services.auth import get_user_by_id
 
 SESSION_COOKIE = "qas_session"
+
+SameSite = Literal["lax", "strict", "none"]
+
+
+def request_is_https(request: Request) -> bool:
+    proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or proto == "https"
+
+
+def session_cookie_kwargs(request: Request) -> dict[str, Any]:
+    settings = get_settings()
+    https = request_is_https(request)
+    samesite: SameSite = "lax"
+    if settings.session_cookie_samesite == "strict":
+        samesite = "strict"
+    elif settings.session_cookie_samesite == "none":
+        samesite = "none"
+    if samesite == "none" and not https:
+        samesite = "lax"
+    return {
+        "httponly": True,
+        "secure": https,
+        "samesite": samesite,
+        "max_age": settings.session_max_age,
+        "path": "/",
+    }
+
+
+def set_session_cookie(response: Response, token: str, request: Request) -> None:
+    response.set_cookie(SESSION_COOKIE, token, **session_cookie_kwargs(request))
+
+
+def clear_session_cookie(response: Response, request: Request) -> None:
+    kwargs = session_cookie_kwargs(request)
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path=kwargs["path"],
+        secure=kwargs["secure"],
+        httponly=kwargs["httponly"],
+        samesite=kwargs["samesite"],
+    )
 
 
 def _serializer() -> URLSafeTimedSerializer:

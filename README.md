@@ -125,7 +125,8 @@ Use the S3-compatible endpoint for your bucket region. Streams always go through
 
 ## Production notes
 
-- Set `DEBUG=false` for secure cookies
+- Session cookies set `Secure` when the request is HTTPS (`X-Forwarded-Proto` behind a reverse proxy). Do not use `DEBUG` to control cookies.
+- Default `SESSION_COOKIE_SAMESITE=lax`. Set `none` only if login runs inside a cross-site iframe (requires HTTPS).
 - Terminate TLS at nginx/Caddy (required for service workers)
 - Set a strong `SECRET_KEY`
 - Configure `MAX_UPLOAD_SIZE_MB` as needed

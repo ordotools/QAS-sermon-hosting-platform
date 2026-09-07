@@ -6,10 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
 from app.deps import (
-    SESSION_COOKIE,
+    clear_session_cookie,
     create_session_token,
     get_current_user_optional,
-    require_user,
+    set_session_cookie,
     template_context,
 )
 from app.models import User
@@ -52,25 +52,15 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
     token = create_session_token(user.id)
-    from app.config import get_settings
-
-    settings = get_settings()
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    redirect.set_cookie(
-        SESSION_COOKIE,
-        token,
-        httponly=True,
-        secure=settings.secure_cookies,
-        samesite="lax",
-        max_age=settings.session_max_age,
-    )
+    set_session_cookie(redirect, token, request)
     return redirect
 
 
 @router.post("/logout")
-async def logout():
+async def logout(request: Request):
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    redirect.delete_cookie(SESSION_COOKIE)
+    clear_session_cookie(redirect, request)
     return redirect
 
 
@@ -159,16 +149,6 @@ async def register(
     user = await create_user(session, email, password)
     await consume_invite(session, invite)
     token_str = create_session_token(user.id)
-    from app.config import get_settings
-
-    settings = get_settings()
     redirect = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    redirect.set_cookie(
-        SESSION_COOKIE,
-        token_str,
-        httponly=True,
-        secure=settings.secure_cookies,
-        samesite="lax",
-        max_age=settings.session_max_age,
-    )
+    set_session_cookie(redirect, token_str, request)
     return redirect

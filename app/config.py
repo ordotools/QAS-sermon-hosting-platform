@@ -26,15 +26,20 @@ class Settings(BaseSettings):
     superuser_password: str = ""
     max_upload_size_mb: int = 500
     session_max_age: int = 604800
+    session_cookie_samesite: str = "lax"
     debug: bool = False
+
+    @field_validator("session_cookie_samesite", mode="before")
+    @classmethod
+    def _normalize_samesite(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"lax", "strict", "none"}:
+            raise ValueError("SESSION_COOKIE_SAMESITE must be lax, strict, or none")
+        return normalized
 
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
-
-    @property
-    def secure_cookies(self) -> bool:
-        return not self.debug
 
 
 @lru_cache

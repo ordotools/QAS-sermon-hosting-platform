@@ -27,6 +27,21 @@ async def test_login_success(client):
     )
     assert r.status_code == 303
     assert "qas_session" in r.cookies
+    flags = {p.strip().lower() for p in r.headers.get("set-cookie", "").split(";")[1:]}
+    assert "secure" not in flags
+
+
+@pytest.mark.asyncio
+async def test_login_sets_secure_cookie_behind_https_proxy(client):
+    r = await client.post(
+        "/login",
+        data={"email": "admin@test.com", "password": "testpass123"},
+        headers={"x-forwarded-proto": "https"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    flags = {p.strip().lower() for p in r.headers.get("set-cookie", "").split(";")[1:]}
+    assert "secure" in flags
 
 
 @pytest.mark.asyncio
