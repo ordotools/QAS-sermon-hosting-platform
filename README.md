@@ -84,17 +84,18 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
 3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
 4. Set `DATABASE_URL` to the **internal** Postgres URL from the database page as-is (`postgres://...`). The app normalizes it automatically.
 5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
-6. On the `app` service, set **Domains** to `https://<your-domain>:8000` (required for the PWA). The `:8000` tells Coolify’s proxy the container port; visitors still use 443. Point DNS A/CNAME at the Coolify server, then redeploy. Compose includes `SERVICE_URL_APP_8000` so Coolify can generate/register the URL and fill **Links**.
+6. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
 
 Media files persist on the `media_data` volume. Use `STORAGE_BACKEND=b2` to store uploads in Backblaze instead.
 
 ### Troubleshooting: Links empty / cannot open the site
 
-Coolify **Links** only lists domains attached to the service. Empty Links means no FQDN is configured, so the proxy has nothing to route.
+Coolify **Links** only lists domains attached to the service. Empty Links means no FQDN / proxy route.
 
-1. Set **Domains** on `app` to `https://<your-domain>:8000` (include `:8000`), or redeploy after `SERVICE_URL_APP_8000` is in the compose file.
-2. Confirm DNS points at the Coolify server.
-3. Redeploy (domain/label changes need a redeploy).
+1. Confirm compose declares a bare list item `- SERVICE_URL_APP_8000` (not `SERVICE_URL_APP_8000: ${SERVICE_URL_APP_8000}`), then redeploy so Coolify re-parses the file.
+2. Check Environment Variables for a generated `SERVICE_URL_APP_8000` value; if Domains for `app` is still blank, use **Generate Domain** or set `https://<your-domain>:8000`.
+3. Confirm DNS points at the Coolify server (for custom domains).
+4. Redeploy after domain changes.
 
 ### Troubleshooting: `failed to resolve host '…': Temporary failure in name resolution`
 

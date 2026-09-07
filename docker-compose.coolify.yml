@@ -8,9 +8,10 @@
 # 4. Service stack → enable "Connect to Predefined Network" → redeploy.
 #    Required so this stack can reach the Coolify-managed Postgres on the shared network.
 # 5. Set env vars below in Coolify (only ${VAR} names listed here are injected).
-# 6. Domains for `app`: https://your.domain:8000 (HTTPS required for PWA).
-#    The :8000 suffix is the container port hint for Coolify’s proxy (public still 443).
-#    SERVICE_URL_APP_8000 below makes Coolify register that route / populate Links.
+# 6. Domains: bare SERVICE_URL_APP_8000 (list item) makes Coolify generate a default
+#    URL and proxy to container port 8000. Custom domain: https://your.domain:8000
+#    (:8000 = container port hint; public still 443). Do not use
+#    SERVICE_URL_APP_8000: ${SERVICE_URL_APP_8000} — that is not a magic declaration.
 #
 # Do not add host ports — Coolify routes traffic via Traefik/Caddy.
 
@@ -21,20 +22,20 @@ services:
     expose:
       - "8000"
     environment:
-      SERVICE_URL_APP_8000: ${SERVICE_URL_APP_8000}
-      DATABASE_URL: ${DATABASE_URL}
-      SECRET_KEY: ${SECRET_KEY}
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
-      LOCAL_STORAGE_PATH: /app/data/media
-      SUPERUSER_EMAIL: ${SUPERUSER_EMAIL}
-      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD}
-      DEBUG: ${DEBUG:-false}
-      B2_KEY_ID: ${B2_KEY_ID:-}
-      B2_APP_KEY: ${B2_APP_KEY:-}
-      B2_BUCKET: ${B2_BUCKET:-}
-      B2_ENDPOINT: ${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}
-      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-500}
-      SESSION_MAX_AGE: ${SESSION_MAX_AGE:-604800}
+      - SERVICE_URL_APP_8000
+      - DATABASE_URL=${DATABASE_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - LOCAL_STORAGE_PATH=/app/data/media
+      - SUPERUSER_EMAIL=${SUPERUSER_EMAIL}
+      - SUPERUSER_PASSWORD=${SUPERUSER_PASSWORD}
+      - DEBUG=${DEBUG:-false}
+      - B2_KEY_ID=${B2_KEY_ID:-}
+      - B2_APP_KEY=${B2_APP_KEY:-}
+      - B2_BUCKET=${B2_BUCKET:-}
+      - B2_ENDPOINT=${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-500}
+      - SESSION_MAX_AGE=${SESSION_MAX_AGE:-604800}
     volumes:
       - media_data:/app/data/media
     healthcheck:
