@@ -18,9 +18,17 @@
   const statusEl = document.getElementById('upload-status');
 
   const ALLOWED_EXT = ['.mp4', '.mov', '.m4a', '.mp3', '.webm', '.ogg'];
+  const CHUNK_SIZE = 8 * 1024 * 1024;
+  const STALL_MS = 30000;
+  const STALL_CHECK_MS = 5000;
 
-  let activeXhr = null;
+  let activeUpload = null;
   let pendingMediaId = null;
+  let wakeLock = null;
+  let stallTimer = null;
+  let lastProgressAt = 0;
+  let lastMediaId = null;
+  let cancelled = false;
 
   function show(el) {
     el?.classList.remove('hidden');
@@ -112,6 +120,19 @@
     fileInput.files = dt.files;
   }
 
+  async function notePreviousUpload(file) {
+    if (!file || typeof tus === 'undefined') return;
+    try {
+      const dummy = new tus.Upload(file, { endpoint: '/files' });
+      const previous = await dummy.findPreviousUploads();
+      if (previous.length) {
+        setMessage('Incomplete upload found for this file. Submit to resume.');
+      }
+    } catch {
+      /* ignore fingerprint lookup errors */
+    }
+  }
+
   function handleFileSelected(file) {
     if (!file) {
       clearFilenameDisplay();
@@ -121,8 +142,10 @@
     const fileError = validateFile(file);
     if (fileError) {
       setError(fileError);
+      setMessage('');
     } else {
       setError('');
+      notePreviousUpload(file);
     }
   }
 
@@ -140,7 +163,58 @@
     pendingMediaId = null;
   }
 
+  async function requestWakeLock() {
+    if (!navigator.wakeLock?.request) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        wakeLock = null;
+      });
+    } catch {
+      wakeLock = null;
+    }
+  }
+
+  async function releaseWakeLock() {
+    const lock = wakeLock;
+    wakeLock = null;
+    if (!lock) return;
+    try {
+      await lock.release();
+    } catch {
+      /* already released */
+    }
+  }
+
+  function stopStallWatch() {
+    if (stallTimer) {
+      clearInterval(stallTimer);
+      stallTimer = null;
+    }
+  }
+
+  function startStallWatch(upload) {
+    stopStallWatch();
+    lastProgressAt = Date.now();
+    stallTimer = setInterval(() => {
+      if (!activeUpload) {
+        stopStallWatch();
+        return;
+      }
+      if (Date.now() - lastProgressAt < STALL_MS) return;
+      stopStallWatch();
+      try {
+        upload.abort();
+      } catch {
+        /* ignore */
+      }
+      handleFailure('Upload stalled. Submit again to resume from the last chunk.');
+    }, STALL_CHECK_MS);
+  }
+
   function handleSuccess(mediaId) {
+    stopStallWatch();
+    releaseWakeLock();
     resetProgress();
     setUploading(false);
     setError('');
@@ -149,15 +223,31 @@
     if (fileInput) fileInput.value = '';
     clearFilenameDisplay();
     refreshUploadStatus();
-    activeXhr = null;
+    activeUpload = null;
   }
 
   function handleFailure(msg) {
+    stopStallWatch();
+    releaseWakeLock();
     resetProgress();
     setUploading(false);
     setMessage('');
     setError(msg || 'Upload failed. Please try again.');
-    activeXhr = null;
+    activeUpload = null;
+  }
+
+  function errorMessage(error) {
+    const body = error?.originalResponse?.getBody?.();
+    if (body) {
+      try {
+        const data = JSON.parse(body);
+        if (data?.error) return data.error;
+      } catch {
+        /* not json */
+      }
+    }
+    if (error?.message) return error.message;
+    return 'Network error during upload. Submit again to resume.';
   }
 
   fileInput?.addEventListener('change', () => {
@@ -188,16 +278,29 @@
   });
 
   cancelBtn?.addEventListener('click', () => {
-    if (activeXhr) activeXhr.abort();
+    if (!activeUpload) return;
+    cancelled = true;
+    try {
+      activeUpload.abort(true);
+    } catch {
+      try {
+        activeUpload.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+    handleFailure('Upload cancelled.');
   });
 
-  form.addEventListener('submit', (e) => {
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (activeXhr) return;
+    if (activeUpload) return;
 
     setError('');
     setMessage('');
     pendingMediaId = null;
+    lastMediaId = null;
+    cancelled = false;
 
     const file = fileInput?.files?.[0];
     if (!file) {
@@ -211,55 +314,81 @@
       return;
     }
 
-    const formData = new FormData(form);
-    const xhr = new XMLHttpRequest();
-    activeXhr = xhr;
+    if (typeof tus === 'undefined') {
+      setError('Uploader failed to load. Refresh and try again.');
+      return;
+    }
 
-    setUploading(true);
-    show(progressWrap);
-    updateProgress(0, 1);
+    const title = (form.elements.namedItem('title')?.value || '').trim();
+    if (!title) {
+      setError('Title is required.');
+      return;
+    }
 
-    xhr.open('POST', form.action || '/upload');
-    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-    xhr.responseType = 'text';
+    const description = form.elements.namedItem('description')?.value || '';
+    const publishedAt = form.elements.namedItem('published_at')?.value || '';
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) updateProgress(event.loaded, event.total);
-    };
-
-    xhr.onload = () => {
-      let data = null;
-      const ct = xhr.getResponseHeader('Content-Type') || '';
-      if (ct.includes('application/json')) {
-        try {
-          data = JSON.parse(xhr.responseText);
-        } catch {
-          handleFailure('Invalid server response.');
+    const upload = new tus.Upload(file, {
+      endpoint: '/files',
+      chunkSize: CHUNK_SIZE,
+      retryDelays: [0, 1000, 3000, 5000],
+      storeFingerprintForResuming: true,
+      removeFingerprintOnSuccess: true,
+      metadata: {
+        filename: file.name,
+        filetype: file.type || 'application/octet-stream',
+        title,
+        description,
+        published_at: publishedAt,
+      },
+      onError(error) {
+        if (cancelled) {
+          handleFailure('Upload cancelled.');
           return;
         }
+        handleFailure(errorMessage(error));
+      },
+      onProgress(bytesUploaded, bytesTotal) {
+        lastProgressAt = Date.now();
+        updateProgress(bytesUploaded, bytesTotal);
+      },
+      onAfterResponse(_req, res) {
+        const mediaId = res.getHeader('X-Media-Id') || res.getHeader('x-media-id');
+        if (mediaId) lastMediaId = mediaId;
+      },
+      onSuccess() {
+        handleSuccess(lastMediaId);
+      },
+    });
+
+    activeUpload = upload;
+    setUploading(true);
+    show(progressWrap);
+    updateProgress(0, file.size || 1);
+    await requestWakeLock();
+    startStallWatch(upload);
+
+    try {
+      const previous = await upload.findPreviousUploads();
+      if (previous.length) {
+        upload.resumeFromPreviousUpload(previous[0]);
+        setMessage('Resuming previous upload…');
       }
-
-      if (xhr.status >= 200 && xhr.status < 300 && data?.ok) {
-        handleSuccess(data.media_id);
-        return;
-      }
-
-      const err =
-        data?.error ||
-        (xhr.status === 413 ? 'File exceeds the upload size limit.' : null) ||
-        `Upload failed (${xhr.status}).`;
-      handleFailure(err);
-    };
-
-    xhr.onerror = () => handleFailure('Network error during upload.');
-    xhr.onabort = () => handleFailure('Upload cancelled.');
-
-    xhr.send(formData);
+      upload.start();
+    } catch (err) {
+      handleFailure(err?.message || 'Could not start upload.');
+    }
   });
 
   document.body.addEventListener('htmx:afterSwap', (event) => {
     const target = event.detail?.target;
     if (!target || target.id !== 'upload-status') return;
     clearPendingIfReady(target);
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && activeUpload) {
+      requestWakeLock();
+    }
   });
 })();

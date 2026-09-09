@@ -28,9 +28,59 @@ router = APIRouter(tags=["upload"])
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
-async def _run_processing(media_id: int, temp_path: str) -> None:
-    async with async_session() as session:
-        await process_media(session, media_id, temp_path)
+async def run_processing(media_id: int, temp_path: str) -> None:
+    try:
+        async with async_session() as session:
+            await process_media(session, media_id, temp_path)
+    finally:
+        Path(str(temp_path) + ".info").unlink(missing_ok=True)
+
+
+async def create_item_from_temp_file(
+    *,
+    temp_path: str,
+    filename: str,
+    mime_type: str,
+    title: str,
+    description: str,
+    published_at: str,
+    user: User,
+    session: AsyncSession,
+) -> tuple[MediaItem | None, str | None, int]:
+    title = title.strip()
+    if not title:
+        return None, "Title is required", status.HTTP_400_BAD_REQUEST
+
+    ext_error = validate_extension(filename)
+    if ext_error:
+        return None, ext_error, status.HTTP_400_BAD_REQUEST
+
+    pub_dt = datetime.utcnow()
+    if published_at:
+        try:
+            pub_dt = datetime.fromisoformat(published_at)
+        except ValueError:
+            return None, "Invalid published date format", status.HTTP_400_BAD_REQUEST
+
+    if not ffprobe_available():
+        return None, media_tools_error(), status.HTTP_503_SERVICE_UNAVAILABLE
+
+    probe = probe_media(temp_path)
+    validation_error = validate_probe(probe)
+    if validation_error:
+        return None, validation_error, status.HTTP_400_BAD_REQUEST
+
+    item = await create_media_record(
+        session,
+        title=title,
+        description=description.strip() or None,
+        published_at=pub_dt,
+        mime_type=mime_type or "application/octet-stream",
+        file_size=Path(temp_path).stat().st_size,
+        uploaded_by_id=user.id,
+        storage_key=new_storage_key(filename),
+    )
+    return item, None, status.HTTP_200_OK
 
 
 async def _recent_uploads(session: AsyncSession, user_id: int) -> list[MediaItem]:
@@ -137,10 +187,9 @@ async def upload_media(
             request, session, user, ext_error, status.HTTP_400_BAD_REQUEST
         )
 
-    pub_dt = datetime.utcnow()
     if published_at:
         try:
-            pub_dt = datetime.fromisoformat(published_at)
+            datetime.fromisoformat(published_at)
         except ValueError:
             return await _upload_error(
                 request,
@@ -151,7 +200,7 @@ async def upload_media(
             )
 
     suffix = Path(filename).suffix
-    temp_path, file_size, size_error = await _stream_upload_to_temp(
+    temp_path, _file_size, size_error = await _stream_upload_to_temp(
         file, max_bytes=settings.max_upload_bytes, suffix=suffix
     )
     if size_error:
@@ -165,45 +214,24 @@ async def upload_media(
 
     assert temp_path is not None
     try:
-        if not ffprobe_available():
-            return await _upload_error(
-                request,
-                session,
-                user,
-                media_tools_error(),
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        probe = probe_media(temp_path)
-        validation_error = validate_probe(probe)
-        if validation_error:
-            Path(temp_path).unlink(missing_ok=True)
-            return await _upload_error(
-                request,
-                session,
-                user,
-                validation_error,
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-        mime_type = file.content_type or "application/octet-stream"
-        storage_key = new_storage_key(filename)
-
-        item = await create_media_record(
-            session,
-            title=title.strip(),
-            description=description.strip() or None,
-            published_at=pub_dt,
-            mime_type=mime_type,
-            file_size=file_size,
-            uploaded_by_id=user.id,
-            storage_key=storage_key,
+        item, finalize_error, finalize_code = await create_item_from_temp_file(
+            temp_path=temp_path,
+            filename=filename,
+            mime_type=file.content_type or "application/octet-stream",
+            title=title,
+            description=description,
+            published_at=published_at,
+            user=user,
+            session=session,
         )
+        if finalize_error or item is None:
+            Path(temp_path).unlink(missing_ok=True)
+            return await _upload_error(request, session, user, finalize_error or "Upload failed", finalize_code)
     except Exception:
         Path(temp_path).unlink(missing_ok=True)
         raise
 
-    background_tasks.add_task(_run_processing, item.id, temp_path)
+    background_tasks.add_task(run_processing, item.id, temp_path)
 
     if _wants_json(request):
         return JSONResponse({"ok": True, "media_id": item.id})

@@ -7,7 +7,7 @@ FastAPI + HTMX + PWA platform for sermon and media hosting. Public playback, aut
 - Public chronological media list and HTML5 player
 - Session-based auth (user / superuser roles)
 - Invite-only registration
-- Media upload with ffprobe validation, automatic transcoding, upload progress, and ffmpeg thumbnails
+- Media upload with resumable tus chunks, ffprobe validation, automatic transcoding, progress, and ffmpeg thumbnails
 - Range-aware stream proxy (no raw storage URLs exposed)
 - PWA installability and save-for-offline playback
 - Local storage (dev) or Backblaze B2 (prod)
@@ -60,7 +60,7 @@ Rejected: images (`.heic`, `.jpg`, etc.), documents, archives, corrupt/unreadabl
 
 iPhone video (`.mov`) and voice memos (`.m4a`) are supported; files are converted automatically for web playback.
 
-**Upload UX:** a progress bar shows bytes reaching the server; after upload completes, the processing status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Large iPhone 4K HEVC files may take several minutes to transcode.
+**Upload UX:** files upload in 8 MB chunks (tus) with a progress bar; if the connection drops, submit again to resume. After the last chunk, the processing status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Keep the upload page open on iPhone (the screen stays awake while uploading). Large iPhone 4K HEVC files may take several minutes to transcode.
 
 ## Docker (PostgreSQL)
 
@@ -131,6 +131,7 @@ Use the S3-compatible endpoint for your bucket region. Streams always go through
 - Set a strong `SECRET_KEY`
 - Configure `MAX_UPLOAD_SIZE_MB` as needed
 - Run with a single uvicorn worker (in-memory rate limits and background transcoding/thumbnails are per-process; uploads queue behind each other)
+- Uploads use short tus PATCH chunks, so Coolify/Caddy/Traefik do not need a giant proxy timeout for iPhone videos
 
 ## PWA manual QA
 

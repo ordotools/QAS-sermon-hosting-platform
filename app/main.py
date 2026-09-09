@@ -9,7 +9,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.config import get_settings
 from app.database import async_session, init_db
-from app.routers import admin, auth, public, stream, upload
+from app.routers import admin, auth, public, stream, tus, upload
 from app.services.auth import bootstrap_superuser
 from app.services.media_formats import ffprobe_available, media_tools_error
 
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     Path(settings.local_storage_path).mkdir(parents=True, exist_ok=True)
+    (Path(settings.local_storage_path) / ".tus").mkdir(parents=True, exist_ok=True)
     Path("data").mkdir(parents=True, exist_ok=True)
     await init_db()
     async with async_session() as session:
@@ -37,6 +38,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(public.router)
 app.include_router(auth.router)
 app.include_router(upload.router)
+app.include_router(tus.router)
 app.include_router(stream.router)
 app.include_router(admin.router)
 
