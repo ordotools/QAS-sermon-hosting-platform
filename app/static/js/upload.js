@@ -19,16 +19,25 @@
 
   const ALLOWED_EXT = ['.mp4', '.mov', '.m4a', '.mp3', '.webm', '.ogg'];
   const CHUNK_SIZE = 8 * 1024 * 1024;
+  const PARALLEL_MIN_SIZE = 16 * 1024 * 1024;
   const STALL_MS = 30000;
   const STALL_CHECK_MS = 5000;
 
   let activeUpload = null;
+  let activeFile = null;
   let pendingMediaId = null;
   let wakeLock = null;
   let stallTimer = null;
   let lastProgressAt = 0;
-  let lastMediaId = null;
+  let lastLoaded = 0;
+  let lastTotal = 0;
   let cancelled = false;
+  let bytesComplete = false;
+  let pendingCommit = false;
+  let commitInFlight = false;
+  let backgroundError = null;
+  let startToken = 0;
+  let commitMeta = { title: '', description: '', published_at: '' };
 
   function show(el) {
     el?.classList.remove('hidden');
@@ -77,7 +86,7 @@
     hide(hintEl);
   }
 
-  function setUploading(active) {
+  function setSubmitting(active) {
     if (submitBtn) {
       submitBtn.disabled = active;
       submitBtn.classList.toggle('is-disabled', active);
@@ -96,7 +105,9 @@
   }
 
   function updateProgress(loaded, total) {
-    if (!progressBar || !progressText || !total) return;
+    lastLoaded = loaded;
+    lastTotal = total;
+    if (!pendingCommit || !progressBar || !progressText || !total) return;
     const pct = Math.min(100, Math.round((loaded / total) * 100));
     progressBar.value = pct;
     progressBar.setAttribute('aria-valuenow', String(pct));
@@ -120,33 +131,79 @@
     fileInput.files = dt.files;
   }
 
-  async function notePreviousUpload(file) {
-    if (!file || typeof tus === 'undefined') return;
+  function sameFile(a, b) {
+    return Boolean(
+      a &&
+        b &&
+        a.name === b.name &&
+        a.size === b.size &&
+        a.lastModified === b.lastModified
+    );
+  }
+
+  function uploadUrlUid(url) {
+    if (!url) return null;
+    const marker = '/files/';
+    const idx = url.lastIndexOf(marker);
+    if (idx < 0) return null;
+    const uid = url.slice(idx + marker.length).split(/[?#]/)[0].replace(/\/$/, '');
+    return uid || null;
+  }
+
+  function previousUploadUrls(prev) {
+    if (Array.isArray(prev?.parallelUploadUrls) && prev.parallelUploadUrls.length) {
+      return prev.parallelUploadUrls.filter(Boolean);
+    }
+    return prev?.url ? [prev.url] : [];
+  }
+
+  function dropStoredUpload(prev) {
+    if (!prev?.urlStorageKey) return;
     try {
-      const dummy = new tus.Upload(file, { endpoint: '/files' });
-      const previous = await dummy.findPreviousUploads();
-      if (previous.length) {
-        setMessage('Incomplete upload found for this file. Submit to resume.');
-      }
+      localStorage.removeItem(prev.urlStorageKey);
     } catch {
-      /* ignore fingerprint lookup errors */
+      /* ignore */
     }
   }
 
-  function handleFileSelected(file) {
-    if (!file) {
-      clearFilenameDisplay();
-      return;
+  async function previousUploadAlive(prev) {
+    const urls = previousUploadUrls(prev);
+    if (!urls.length) return false;
+    try {
+      const heads = await Promise.all(
+        urls.map((url) =>
+          fetch(url, {
+            method: 'HEAD',
+            headers: { 'Tus-Resumable': '1.0.0' },
+          })
+        )
+      );
+      return heads.every((res) => res.ok);
+    } catch {
+      return false;
     }
-    showFilename(file.name);
-    const fileError = validateFile(file);
-    if (fileError) {
-      setError(fileError);
-      setMessage('');
-    } else {
-      setError('');
-      notePreviousUpload(file);
-    }
+  }
+
+  function applyCommitMetadata(upload) {
+    if (!upload?.options) return;
+    upload.options.metadata = {
+      ...(upload.options.metadata || {}),
+      filename: activeFile?.name || upload.options.metadata?.filename || '',
+      filetype: activeFile?.type || upload.options.metadata?.filetype || 'application/octet-stream',
+      title: commitMeta.title,
+      description: commitMeta.description,
+      published_at: commitMeta.published_at,
+    };
+  }
+
+  // Pause /upload/status while tus chunks are in flight so HTMX polls
+  // do not steal the browser's per-host connections (Chrome runtime.lastError
+  // on this page is an extension, not tus).
+  function setStatusPolling(on) {
+    if (!statusEl || typeof htmx === 'undefined') return;
+    if (!on) htmx.trigger(statusEl, 'htmx:abort');
+    statusEl.setAttribute('hx-trigger', on ? 'every 3s' : 'none');
+    htmx.process(statusEl);
   }
 
   function refreshUploadStatus() {
@@ -164,7 +221,7 @@
   }
 
   async function requestWakeLock() {
-    if (!navigator.wakeLock?.request) return;
+    if (!pendingCommit || !navigator.wakeLock?.request) return;
     try {
       wakeLock = await navigator.wakeLock.request('screen');
       wakeLock.addEventListener('release', () => {
@@ -197,7 +254,7 @@
     stopStallWatch();
     lastProgressAt = Date.now();
     stallTimer = setInterval(() => {
-      if (!activeUpload) {
+      if (!activeUpload || !pendingCommit) {
         stopStallWatch();
         return;
       }
@@ -216,24 +273,34 @@
     stopStallWatch();
     releaseWakeLock();
     resetProgress();
-    setUploading(false);
+    setSubmitting(false);
     setError('');
     pendingMediaId = mediaId ?? null;
+    pendingCommit = false;
+    commitInFlight = false;
+    bytesComplete = false;
+    backgroundError = null;
+    activeUpload = null;
+    activeFile = null;
     setMessage('Upload complete — processing…');
     if (fileInput) fileInput.value = '';
     clearFilenameDisplay();
     refreshUploadStatus();
-    activeUpload = null;
+    setStatusPolling(true);
   }
 
   function handleFailure(msg) {
     stopStallWatch();
     releaseWakeLock();
     resetProgress();
-    setUploading(false);
+    setSubmitting(false);
+    pendingCommit = false;
+    commitInFlight = false;
+    activeUpload = null;
+    backgroundError = null;
     setMessage('');
     setError(msg || 'Upload failed. Please try again.');
-    activeUpload = null;
+    setStatusPolling(true);
   }
 
   function errorMessage(error) {
@@ -248,6 +315,183 @@
     }
     if (error?.message) return error.message;
     return 'Network error during upload. Submit again to resume.';
+  }
+
+  function invalidateUpload() {
+    startToken += 1;
+    cancelled = true;
+    const upload = activeUpload;
+    activeUpload = null;
+    activeFile = null;
+    bytesComplete = false;
+    backgroundError = null;
+    pendingCommit = false;
+    commitInFlight = false;
+    lastLoaded = 0;
+    lastTotal = 0;
+    stopStallWatch();
+    setStatusPolling(true);
+    if (!upload) return;
+    Promise.resolve(upload.abort(true)).catch(() => {});
+  }
+
+  async function commitUpload(token) {
+    if (token !== startToken || cancelled || commitInFlight) return;
+    const uid = uploadUrlUid(activeUpload?.url);
+    if (!uid) {
+      handleFailure('Upload finished without a URL.');
+      return;
+    }
+    commitInFlight = true;
+    try {
+      const res = await fetch(`/files/${uid}/commit`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(commitMeta),
+      });
+      if (token !== startToken || cancelled) return;
+      if (!res.ok) {
+        let msg = 'Could not finish upload.';
+        try {
+          const data = await res.json();
+          if (data?.error) msg = data.error;
+        } catch {
+          /* ignore */
+        }
+        handleFailure(msg);
+        return;
+      }
+      const mediaId = res.headers.get('X-Media-Id') || res.headers.get('x-media-id');
+      handleSuccess(mediaId);
+    } catch {
+      if (token !== startToken || cancelled) return;
+      handleFailure('Could not finish upload.');
+    }
+  }
+
+  async function startBackground(file) {
+    const token = ++startToken;
+    cancelled = true;
+    const previous = activeUpload;
+    activeUpload = null;
+    if (previous) {
+      try {
+        await previous.abort(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (token !== startToken) return;
+
+    cancelled = false;
+    bytesComplete = false;
+    backgroundError = null;
+    commitInFlight = false;
+    lastLoaded = 0;
+    lastTotal = file.size || 1;
+    activeFile = file;
+
+    if (typeof tus === 'undefined') return;
+
+    setStatusPolling(false);
+
+    const upload = new tus.Upload(file, {
+      endpoint: '/files',
+      chunkSize: CHUNK_SIZE,
+      parallelUploads: file.size > PARALLEL_MIN_SIZE ? 4 : 1,
+      retryDelays: [0, 1000, 3000, 5000],
+      storeFingerprintForResuming: true,
+      removeFingerprintOnSuccess: true,
+      metadata: {
+        filename: file.name,
+        filetype: file.type || 'application/octet-stream',
+      },
+      onError(error) {
+        if (token !== startToken || cancelled) return;
+        backgroundError = error;
+        if (pendingCommit) {
+          handleFailure(errorMessage(error));
+        } else {
+          setStatusPolling(true);
+        }
+      },
+      onProgress(bytesUploaded, bytesTotal) {
+        if (token !== startToken) return;
+        lastProgressAt = Date.now();
+        updateProgress(bytesUploaded, bytesTotal);
+      },
+      onSuccess() {
+        if (token !== startToken || cancelled) return;
+        bytesComplete = true;
+        if (pendingCommit) commitUpload(token);
+        else setStatusPolling(true);
+      },
+    });
+
+    if (pendingCommit) applyCommitMetadata(upload);
+
+    activeUpload = upload;
+    try {
+      const found = await upload.findPreviousUploads();
+      let resume = null;
+      for (const prev of found) {
+        if (await previousUploadAlive(prev)) {
+          resume = prev;
+          break;
+        }
+        dropStoredUpload(prev);
+      }
+      if (token !== startToken) {
+        try {
+          await upload.abort(true);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      if (resume) {
+        upload.resumeFromPreviousUpload(resume);
+        if (pendingCommit) setMessage('Resuming previous upload…');
+      }
+      upload.start();
+    } catch (err) {
+      if (token !== startToken || cancelled) return;
+      backgroundError = err;
+      if (pendingCommit) {
+        handleFailure(err?.message || 'Could not start upload.');
+      } else {
+        setStatusPolling(true);
+      }
+    }
+  }
+
+  function handleFileSelected(file) {
+    if (!file) {
+      invalidateUpload();
+      clearFilenameDisplay();
+      return;
+    }
+    showFilename(file.name);
+    const fileError = validateFile(file);
+    if (fileError) {
+      invalidateUpload();
+      setError(fileError);
+      setMessage('');
+      return;
+    }
+    setError('');
+    if (
+      activeFile &&
+      sameFile(activeFile, file) &&
+      activeUpload &&
+      !backgroundError
+    ) {
+      return;
+    }
+    startBackground(file);
   }
 
   fileInput?.addEventListener('change', () => {
@@ -278,13 +522,16 @@
   });
 
   cancelBtn?.addEventListener('click', () => {
-    if (!activeUpload) return;
+    if (!activeUpload && !pendingCommit) return;
     cancelled = true;
+    startToken += 1;
+    const upload = activeUpload;
+    activeUpload = null;
     try {
-      activeUpload.abort(true);
+      upload?.abort(true);
     } catch {
       try {
-        activeUpload.abort();
+        upload?.abort();
       } catch {
         /* ignore */
       }
@@ -294,12 +541,11 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (activeUpload) return;
+    if (pendingCommit) return;
 
     setError('');
     setMessage('');
     pendingMediaId = null;
-    lastMediaId = null;
     cancelled = false;
 
     const file = fileInput?.files?.[0];
@@ -325,58 +571,28 @@
       return;
     }
 
-    const description = form.elements.namedItem('description')?.value || '';
-    const publishedAt = form.elements.namedItem('published_at')?.value || '';
+    commitMeta = {
+      title,
+      description: form.elements.namedItem('description')?.value || '',
+      published_at: form.elements.namedItem('published_at')?.value || '',
+    };
 
-    const upload = new tus.Upload(file, {
-      endpoint: '/files',
-      chunkSize: CHUNK_SIZE,
-      retryDelays: [0, 1000, 3000, 5000],
-      storeFingerprintForResuming: true,
-      removeFingerprintOnSuccess: true,
-      metadata: {
-        filename: file.name,
-        filetype: file.type || 'application/octet-stream',
-        title,
-        description,
-        published_at: publishedAt,
-      },
-      onError(error) {
-        if (cancelled) {
-          handleFailure('Upload cancelled.');
-          return;
-        }
-        handleFailure(errorMessage(error));
-      },
-      onProgress(bytesUploaded, bytesTotal) {
-        lastProgressAt = Date.now();
-        updateProgress(bytesUploaded, bytesTotal);
-      },
-      onAfterResponse(_req, res) {
-        const mediaId = res.getHeader('X-Media-Id') || res.getHeader('x-media-id');
-        if (mediaId) lastMediaId = mediaId;
-      },
-      onSuccess() {
-        handleSuccess(lastMediaId);
-      },
-    });
-
-    activeUpload = upload;
-    setUploading(true);
+    pendingCommit = true;
+    setSubmitting(true);
     show(progressWrap);
-    updateProgress(0, file.size || 1);
+    updateProgress(lastLoaded, lastTotal || file.size || 1);
     await requestWakeLock();
-    startStallWatch(upload);
 
-    try {
-      const previous = await upload.findPreviousUploads();
-      if (previous.length) {
-        upload.resumeFromPreviousUpload(previous[0]);
-        setMessage('Resuming previous upload…');
-      }
-      upload.start();
-    } catch (err) {
-      handleFailure(err?.message || 'Could not start upload.');
+    if (backgroundError || !sameFile(activeFile, file) || !activeUpload) {
+      await startBackground(file);
+      if (activeUpload) startStallWatch(activeUpload);
+      return;
+    }
+
+    applyCommitMetadata(activeUpload);
+    startStallWatch(activeUpload);
+    if (bytesComplete) {
+      await commitUpload(startToken);
     }
   });
 
@@ -387,7 +603,7 @@
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && activeUpload) {
+    if (document.visibilityState === 'visible' && pendingCommit && activeUpload) {
       requestWakeLock();
     }
   });

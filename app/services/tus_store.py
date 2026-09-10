@@ -1,4 +1,5 @@
 import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ class TusUpload:
     metadata: dict[str, str]
     user_id: int
     media_id: int | None = None
+    concat: str | None = None
 
 
 def tus_dir() -> Path:
@@ -45,12 +47,23 @@ def load(uid: str) -> TusUpload | None:
         metadata=dict(raw.get("metadata") or {}),
         user_id=int(raw["user_id"]),
         media_id=raw.get("media_id"),
+        concat=raw.get("concat"),
     )
 
 
 def create(upload: TusUpload) -> None:
     data_path(upload.uid).touch()
     save(upload)
+
+
+def write_concat(dest: TusUpload, part_uids: list[str]) -> None:
+    dest_path = data_path(dest.uid)
+    with dest_path.open("wb") as out:
+        for uid in part_uids:
+            with data_path(uid).open("rb") as inp:
+                shutil.copyfileobj(inp, out, length=1024 * 1024)
+    dest.offset = dest.size
+    save(dest)
 
 
 def delete(uid: str) -> None:

@@ -29,6 +29,7 @@ Phased implementation checklist. Public read for media; auth required for upload
 - [x] Automatic transcoding (HEVC/ALAC/WebM/OGG → H.264 MP4 or AAC M4A)
 - [x] Upload progress bar (XHR + server JSON response)
 - [x] Resumable/chunked uploads (tus) for large iPhone videos
+- [x] Eager background upload on file select; parallel tus chunks via concatenation; commit on submit
 
 ## Phase 3 — Public viewer
 

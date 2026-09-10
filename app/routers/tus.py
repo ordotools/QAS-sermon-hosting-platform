@@ -5,9 +5,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -17,14 +19,21 @@ from app.models import User
 from app.routers.upload import create_item_from_temp_file, run_processing
 from app.services.media_formats import validate_extension
 from app.services.rate_limit import rate_limit
-from app.services.tus_store import TusUpload, create, data_path, delete, load, save
+from app.services.tus_store import TusUpload, create, data_path, delete, load, save, write_concat
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["tus"])
 
 TUS_VERSION = "1.0.0"
+_HEX = set("0123456789abcdef")
 _locks: dict[str, asyncio.Lock] = {}
+
+
+class CommitBody(BaseModel):
+    title: str = ""
+    description: str = ""
+    published_at: str = ""
 
 
 def _lock_for(uid: str) -> asyncio.Lock:
@@ -35,16 +44,28 @@ def _lock_for(uid: str) -> asyncio.Lock:
     return lock
 
 
+async def _acquire_locks(uids: list[str]) -> list[asyncio.Lock]:
+    locks = [_lock_for(uid) for uid in sorted(set(uids))]
+    for lock in locks:
+        await lock.acquire()
+    return locks
+
+
+def _release_locks(locks: list[asyncio.Lock]) -> None:
+    for lock in reversed(locks):
+        lock.release()
+
+
 def _tus_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     settings = get_settings()
     headers = {
         "Tus-Resumable": TUS_VERSION,
         "Tus-Version": TUS_VERSION,
         "Tus-Max-Size": str(settings.max_upload_bytes),
-        "Tus-Extension": "creation,termination",
+        "Tus-Extension": "creation,termination,concatenation",
         "Cache-Control": "no-store",
         "Access-Control-Expose-Headers": (
-            "Location, Upload-Offset, Upload-Length, Tus-Resumable, "
+            "Location, Upload-Offset, Upload-Length, Upload-Concat, Tus-Resumable, "
             "Tus-Version, Tus-Extension, Tus-Max-Size, X-Media-Id"
         ),
     }
@@ -97,6 +118,187 @@ def _parse_length(value: str | None) -> int | None:
     return int(value)
 
 
+def _parse_concat(header: str | None) -> tuple[str | None, list[str], str | None]:
+    if not header or not header.strip():
+        return None, [], None
+    value = header.strip()
+    lower = value.lower()
+    if lower == "partial":
+        return "partial", [], None
+    if lower.startswith("final;"):
+        rest = value.split(";", 1)[1].strip()
+        urls = [part.strip() for part in rest.split() if part.strip()]
+        if not urls:
+            return None, [], "Upload-Concat final list is empty"
+        return "final", urls, None
+    return None, [], "Invalid Upload-Concat header"
+
+
+def _uid_from_concat_url(url: str) -> str | None:
+    path = urlparse(url).path if "://" in url else url
+    marker = "/files/"
+    idx = path.rfind(marker)
+    if idx < 0:
+        return None
+    uid = path[idx + len(marker) :].strip("/")
+    if uid and len(uid) == 32 and all(c in _HEX for c in uid):
+        return uid
+    return None
+
+
+def _location(request: Request, uid: str) -> str:
+    return str(request.base_url).rstrip("/") + f"/files/{uid}"
+
+
+async def _drain_request(request: Request) -> None:
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+        if message["type"] == "http.request" and not message.get("more_body", False):
+            return
+
+
+async def _read_patch_bytes(request: Request, max_bytes: int) -> bytes:
+    expected = _parse_length(request.headers.get("content-length"))
+    chunks: list[bytes] = []
+    total = 0
+    too_large = expected is not None and expected > max_bytes
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            break
+        if message["type"] != "http.request":
+            continue
+        piece = message.get("body", b"")
+        if piece:
+            total += len(piece)
+            if total > max_bytes:
+                too_large = True
+            if not too_large:
+                chunks.append(piece)
+        if not message.get("more_body", False):
+            break
+    if too_large:
+        raise ValueError("chunk too large")
+    return b"".join(chunks)
+
+
+def _write_patch_bytes(path: Path, offset: int, body: bytes) -> None:
+    with path.open("r+b") as handle:
+        handle.seek(offset)
+        if body:
+            handle.write(body)
+        handle.flush()
+
+
+def _offset_headers(upload: TusUpload, extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {
+        "Upload-Offset": str(upload.offset),
+        "Upload-Length": str(upload.size),
+    }
+    if upload.concat:
+        headers["Upload-Concat"] = upload.concat
+    if upload.media_id is not None:
+        headers["X-Media-Id"] = str(upload.media_id)
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _owned_upload(uid: str, user: User) -> tuple[TusUpload | None, JSONResponse | None]:
+    upload = load(uid)
+    if not upload or upload.user_id != user.id:
+        return None, _tus_error("Upload not found", status.HTTP_404_NOT_FOUND)
+    return upload, None
+
+
+def _validate_metadata(metadata: dict[str, str], *, require_filename: bool) -> JSONResponse | None:
+    filename = Path(metadata.get("filename") or metadata.get("name") or "").name
+    if require_filename:
+        if not filename:
+            return _tus_error("filename metadata is required", status.HTTP_400_BAD_REQUEST)
+        ext_error = validate_extension(filename)
+        if ext_error:
+            return _tus_error(ext_error, status.HTTP_400_BAD_REQUEST)
+    published_at = (metadata.get("published_at") or "").strip()
+    if published_at:
+        try:
+            datetime.fromisoformat(published_at)
+        except ValueError:
+            return _tus_error("Invalid published date format", status.HTTP_400_BAD_REQUEST)
+    return None
+
+
+async def _create_final(
+    request: Request,
+    user: User,
+    metadata: dict[str, str],
+    part_urls: list[str],
+) -> Response:
+    settings = get_settings()
+    part_uids: list[str] = []
+    for url in part_urls:
+        uid = _uid_from_concat_url(url)
+        if not uid:
+            return _tus_error("Invalid concatenation URL", status.HTTP_400_BAD_REQUEST)
+        part_uids.append(uid)
+
+    dest: TusUpload | None = None
+    locks = await _acquire_locks(part_uids)
+    try:
+        total = 0
+        for uid in part_uids:
+            upload, err = _owned_upload(uid, user)
+            if err:
+                return err
+            assert upload is not None
+            if (upload.concat or "").lower() != "partial":
+                return _tus_error(
+                    "Concatenation source is not a partial upload",
+                    status.HTTP_400_BAD_REQUEST,
+                )
+            if upload.offset != upload.size:
+                return _tus_error("Concatenation source is incomplete", status.HTTP_400_BAD_REQUEST)
+            if not data_path(uid).is_file():
+                return _tus_error("Concatenation source is missing", status.HTTP_404_NOT_FOUND)
+            total += upload.size
+
+        if total > settings.max_upload_bytes:
+            return _tus_error(
+                f"File exceeds {settings.max_upload_size_mb} MB limit",
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        dest_uid = uuid.uuid4().hex
+        dest = TusUpload(
+            uid=dest_uid,
+            size=total,
+            offset=0,
+            metadata=metadata,
+            user_id=user.id,
+            concat="final;" + " ".join(part_urls),
+        )
+        try:
+            await asyncio.to_thread(write_concat, dest, part_uids)
+        except Exception:
+            delete(dest_uid)
+            logger.exception("tus concat failed for %s", dest_uid)
+            return _tus_error("Could not concatenate upload", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        for uid in part_uids:
+            delete(uid)
+            _locks.pop(uid, None)
+    finally:
+        _release_locks(locks)
+
+    assert dest is not None
+    return _tus_response(
+        status.HTTP_201_CREATED,
+        _offset_headers(dest, {"Location": _location(request, dest.uid)}),
+    )
+
+
 @router.options("/files")
 @router.options("/files/{uid}")
 async def tus_options():
@@ -108,10 +310,21 @@ async def tus_create(
     request: Request,
     user: User = Depends(require_user),
 ):
-    rate_limit(request, "upload", max_requests=20, window_seconds=3600)
     precondition = _require_tus_resumable(request)
     if precondition:
         return precondition
+
+    concat_kind, part_urls, concat_error = _parse_concat(request.headers.get("upload-concat"))
+    if concat_error:
+        return _tus_error(concat_error, status.HTTP_400_BAD_REQUEST)
+
+    metadata = decode_upload_metadata(request.headers.get("upload-metadata"))
+    meta_error = _validate_metadata(metadata, require_filename=concat_kind != "partial")
+    if meta_error:
+        return meta_error
+
+    if concat_kind == "final":
+        return await _create_final(request, user, metadata, part_urls)
 
     settings = get_settings()
     size = _parse_length(request.headers.get("upload-length"))
@@ -123,48 +336,20 @@ async def tus_create(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
-    metadata = decode_upload_metadata(request.headers.get("upload-metadata"))
-    filename = Path(metadata.get("filename") or metadata.get("name") or "").name
-    if not filename:
-        return _tus_error("filename metadata is required", status.HTTP_400_BAD_REQUEST)
-
-    ext_error = validate_extension(filename)
-    if ext_error:
-        return _tus_error(ext_error, status.HTTP_400_BAD_REQUEST)
-
-    title = (metadata.get("title") or "").strip()
-    if not title:
-        return _tus_error("Title is required", status.HTTP_400_BAD_REQUEST)
-
-    published_at = (metadata.get("published_at") or "").strip()
-    if published_at:
-        try:
-            datetime.fromisoformat(published_at)
-        except ValueError:
-            return _tus_error("Invalid published date format", status.HTTP_400_BAD_REQUEST)
-
     uid = uuid.uuid4().hex
-    create(
-        TusUpload(
-            uid=uid,
-            size=size,
-            offset=0,
-            metadata=metadata,
-            user_id=user.id,
-        )
+    upload = TusUpload(
+        uid=uid,
+        size=size,
+        offset=0,
+        metadata=metadata,
+        user_id=user.id,
+        concat="partial" if concat_kind == "partial" else None,
     )
-    location = str(request.base_url).rstrip("/") + f"/files/{uid}"
+    create(upload)
     return _tus_response(
         status.HTTP_201_CREATED,
-        {"Location": location, "Upload-Offset": "0", "Upload-Length": str(size)},
+        _offset_headers(upload, {"Location": _location(request, uid)}),
     )
-
-
-def _owned_upload(uid: str, user: User) -> tuple[TusUpload | None, JSONResponse | None]:
-    upload = load(uid)
-    if not upload or upload.user_id != user.id:
-        return None, _tus_error("Upload not found", status.HTTP_404_NOT_FOUND)
-    return upload, None
 
 
 @router.head("/files/{uid}")
@@ -180,29 +365,23 @@ async def tus_head(
     if err:
         return err
     assert upload is not None
-    extra = {
-        "Upload-Offset": str(upload.offset),
-        "Upload-Length": str(upload.size),
-    }
-    if upload.media_id is not None:
-        extra["X-Media-Id"] = str(upload.media_id)
-    return _tus_response(status.HTTP_204_NO_CONTENT, extra)
+    return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
 
 @router.patch("/files/{uid}")
 async def tus_patch(
     uid: str,
     request: Request,
-    background_tasks: BackgroundTasks,
-    session: Annotated[AsyncSession, Depends(get_session)],
     user: User = Depends(require_user),
 ):
     precondition = _require_tus_resumable(request)
     if precondition:
+        await _drain_request(request)
         return precondition
 
     content_type = (request.headers.get("content-type") or "").split(";")[0].strip()
     if content_type != "application/offset+octet-stream":
+        await _drain_request(request)
         return _tus_error(
             "Content-Type must be application/offset+octet-stream",
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -210,41 +389,43 @@ async def tus_patch(
 
     offset = _parse_length(request.headers.get("upload-offset"))
     if offset is None:
+        await _drain_request(request)
         return _tus_error("Upload-Offset is required", status.HTTP_400_BAD_REQUEST)
 
     async with _lock_for(uid):
         upload, err = _owned_upload(uid, user)
         if err:
+            await _drain_request(request)
             return err
         assert upload is not None
 
         if offset != upload.offset:
+            await _drain_request(request)
             return _tus_response(
                 status.HTTP_409_CONFLICT,
-                {"Upload-Offset": str(upload.offset), "Upload-Length": str(upload.size)},
+                _offset_headers(upload),
             )
 
         path = data_path(uid)
         if not path.is_file():
+            await _drain_request(request)
             return _tus_error("Upload not found", status.HTTP_404_NOT_FOUND)
 
         prev = upload.offset
-        written = 0
+        remaining = upload.size - prev
         try:
-            with path.open("r+b") as handle:
-                handle.seek(prev)
-                async for chunk in request.stream():
-                    if not chunk:
-                        continue
-                    written += len(chunk)
-                    if prev + written > upload.size:
-                        handle.truncate(prev)
-                        return _tus_error(
-                            "Chunk exceeds remaining upload length",
-                            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        )
-                    handle.write(chunk)
-                handle.flush()
+            body = await _read_patch_bytes(request, remaining)
+        except ValueError:
+            return _tus_error(
+                "Chunk exceeds remaining upload length",
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        except Exception:
+            logger.exception("tus PATCH read failed for %s", uid)
+            return _tus_error("Upload interrupted", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        try:
+            await asyncio.to_thread(_write_patch_bytes, path, prev, body)
         except Exception:
             if path.is_file():
                 with path.open("r+b") as handle:
@@ -252,37 +433,67 @@ async def tus_patch(
             logger.exception("tus PATCH failed for %s", uid)
             return _tus_error("Upload interrupted", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        upload.offset = prev + written
+        upload.offset = prev + len(body)
         save(upload)
+        return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
-        extra = {
-            "Upload-Offset": str(upload.offset),
-            "Upload-Length": str(upload.size),
-        }
-        if upload.offset < upload.size:
-            return _tus_response(status.HTTP_204_NO_CONTENT, extra)
 
-        filename = Path(upload.metadata.get("filename") or "upload.bin").name
+@router.post("/files/{uid}/commit")
+async def tus_commit(
+    uid: str,
+    request: Request,
+    body: CommitBody,
+    background_tasks: BackgroundTasks,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: User = Depends(require_user),
+):
+    rate_limit(request, "upload", max_requests=20, window_seconds=3600)
+
+    async with _lock_for(uid):
+        upload, err = _owned_upload(uid, user)
+        if err:
+            return err
+        assert upload is not None
+
+        if (upload.concat or "").lower() == "partial":
+            return _tus_error("Partial uploads cannot be committed", status.HTTP_409_CONFLICT)
+
+        if upload.media_id is not None:
+            return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
+
+        if upload.offset != upload.size:
+            return _tus_error("Upload is not complete", status.HTTP_409_CONFLICT)
+
+        path = data_path(uid)
+        if not path.is_file():
+            return _tus_error("Upload not found", status.HTTP_404_NOT_FOUND)
+
+        title = body.title.strip() or (upload.metadata.get("title") or "").strip()
+        description = body.description if body.description else (upload.metadata.get("description") or "")
+        published_at = body.published_at.strip() or (upload.metadata.get("published_at") or "")
+        filename = Path(upload.metadata.get("filename") or upload.metadata.get("name") or "upload.bin").name
         mime_type = upload.metadata.get("filetype") or "application/octet-stream"
+
         item, error, code = await create_item_from_temp_file(
             temp_path=str(path),
             filename=filename,
             mime_type=mime_type,
-            title=upload.metadata.get("title") or "",
-            description=upload.metadata.get("description") or "",
-            published_at=upload.metadata.get("published_at") or "",
+            title=title,
+            description=description,
+            published_at=published_at,
             user=user,
             session=session,
         )
         if error or item is None:
-            delete(uid)
             return _tus_error(error or "Upload failed", code)
 
         upload.media_id = item.id
+        upload.metadata["title"] = title
+        upload.metadata["description"] = description
+        upload.metadata["published_at"] = published_at
         save(upload)
         background_tasks.add_task(run_processing, item.id, str(path))
-        extra["X-Media-Id"] = str(item.id)
-        return _tus_response(status.HTTP_204_NO_CONTENT, extra)
+        return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
 
 @router.delete("/files/{uid}")
