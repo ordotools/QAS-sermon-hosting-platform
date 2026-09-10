@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.db_url import normalize_async_database_url
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     b2_endpoint: str = "https://s3.us-west-004.backblazeb2.com"
     superuser_email: str = ""
     superuser_password: str = ""
-    max_upload_size_mb: int = 500
+    max_upload_size_mb: int = 1500
     session_max_age: int = 604800
     session_cookie_samesite: str = "lax"
     debug: bool = False
@@ -36,6 +36,25 @@ class Settings(BaseSettings):
         if normalized not in {"lax", "strict", "none"}:
             raise ValueError("SESSION_COOKIE_SAMESITE must be lax, strict, or none")
         return normalized
+
+    @model_validator(mode="after")
+    def _require_b2_credentials(self) -> "Settings":
+        if self.storage_backend != "b2":
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("B2_KEY_ID", self.b2_key_id),
+                ("B2_APP_KEY", self.b2_app_key),
+                ("B2_BUCKET", self.b2_bucket),
+            )
+            if not str(value).strip()
+        ]
+        if missing:
+            raise ValueError(
+                "STORAGE_BACKEND=b2 requires " + ", ".join(missing)
+            )
+        return self
 
     @property
     def max_upload_bytes(self) -> int:

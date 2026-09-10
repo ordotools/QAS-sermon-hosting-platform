@@ -31,7 +31,7 @@ services:
       B2_APP_KEY: ${B2_APP_KEY:-}
       B2_BUCKET: ${B2_BUCKET:-}
       B2_ENDPOINT: ${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}
-      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-500}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-1500}
     volumes:
       - media_data:/app/data/media
     depends_on:

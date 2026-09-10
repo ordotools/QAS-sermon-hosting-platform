@@ -60,7 +60,7 @@ Rejected: images (`.heic`, `.jpg`, etc.), documents, archives, corrupt/unreadabl
 
 iPhone video (`.mov`) and voice memos (`.m4a`) are supported; files are converted automatically for web playback.
 
-**Upload UX:** files upload in 8 MB chunks (tus) with a progress bar; if the connection drops, submit again to resume. After the last chunk, the processing status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Keep the upload page open on iPhone (the screen stays awake while uploading). Large iPhone 4K HEVC files may take several minutes to transcode.
+**Upload UX:** choosing a file starts a silent tus transfer immediately (up to 4 parallel 8 MB chunks for files over 16 MB). Changing the file aborts the old upload and starts the new one. Submit (with a title) commits the transfer — if bytes are already there, processing starts right away. If the connection drops, submit again to resume. After commit, the status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Keep the upload page open on iPhone (the screen stays awake after you submit). Large iPhone 4K HEVC files may take several minutes to transcode.
 
 ## Docker (PostgreSQL)
 
@@ -84,9 +84,22 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
 3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
 4. Set `DATABASE_URL` to the **internal** Postgres URL from the database page as-is (`postgres://...`). The app normalizes it automatically.
 5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
-6. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
+6. Set Backblaze as the durable store (compose defaults `STORAGE_BACKEND=b2`; the app will not start without credentials):
 
-Media files persist on the `media_data` volume. Use `STORAGE_BACKEND=b2` to store uploads in Backblaze instead.
+   ```env
+   STORAGE_BACKEND=b2
+   B2_KEY_ID=your-key-id
+   B2_APP_KEY=your-app-key
+   B2_BUCKET=your-bucket-name
+   B2_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+   MAX_UPLOAD_SIZE_MB=1500
+   ```
+
+7. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
+
+The `media_data` volume is scratch only (tus chunks and ffmpeg temps). Finished media and thumbnails live in Backblaze. Playback still goes through `/stream/{id}` — never public B2 URLs.
+
+Prefer 1080p HEVC for 10–15 minute iPhone videos. 15-minute 1080p and 4K can still exceed the 1.5 GB cap.
 
 ### Troubleshooting: Links empty / cannot open the site
 
@@ -129,7 +142,7 @@ Use the S3-compatible endpoint for your bucket region. Streams always go through
 - Default `SESSION_COOKIE_SAMESITE=lax`. Set `none` only if login runs inside a cross-site iframe (requires HTTPS).
 - Terminate TLS at nginx/Caddy (required for service workers)
 - Set a strong `SECRET_KEY`
-- Configure `MAX_UPLOAD_SIZE_MB` as needed
+- Default `MAX_UPLOAD_SIZE_MB=1500`. Prefer 1080p HEVC; 15-minute 1080p and 4K can still exceed 1.5 GB.
 - Run with a single uvicorn worker (in-memory rate limits and background transcoding/thumbnails are per-process; uploads queue behind each other)
 - Uploads use short tus PATCH chunks, so Coolify/Caddy/Traefik do not need a giant proxy timeout for iPhone videos
 
