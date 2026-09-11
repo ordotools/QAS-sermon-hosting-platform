@@ -94,7 +94,7 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
    MAX_UPLOAD_SIZE_MB=1500
    ```
 
-   Do not set `STORAGE_BACKEND=local` in Coolify. Compose pins `STORAGE_BACKEND=b2`, and the app also forces B2 when Coolify env is present. Confirm with `GET /health` (`"storage":"b2"`). Objects land under `media/` and `thumbnails/`, not the bucket root. Files already on the volume stay there until re-uploaded.
+   Do not set `STORAGE_BACKEND=local` in Coolify. Compose pins `STORAGE_BACKEND=b2`, and the app also forces B2 when Coolify env is present. Confirm with `GET /health` (`"storage":"b2"`) or Admin → Storage. Objects land under `media/` and `thumbnails/`, not the bucket root. Failed (`processing` never reached `ready`) files never leave the scratch volume. Files already on the volume stay there until re-uploaded.
 
 7. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
 
