@@ -8,15 +8,15 @@ import boto3
 from boto3.exceptions import S3UploadFailedError
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# B2 allows a single PutObject up to 5 GiB. Stay under that so boto3 does
-# not call CreateMultipartUpload (needs a matching S3 region).
-_SINGLE_PUT_MAX = 4 * 1024 * 1024 * 1024
+_MULTIPART_THRESHOLD = 8 * 1024 * 1024
+_MULTIPART_CHUNKSIZE = 16 * 1024 * 1024
+_UPLOAD_ERRORS = (BotoCoreError, ClientError, S3UploadFailedError)
 
 
 def region_from_endpoint(endpoint: str) -> str:
@@ -32,6 +32,7 @@ def _boto_config() -> Config:
     kwargs: dict = {
         "signature_version": "s3v4",
         "s3": {"addressing_style": "path"},
+        "retries": {"max_attempts": 8, "mode": "standard"},
         "request_checksum_calculation": "when_required",
         "response_checksum_validation": "when_required",
     }
@@ -45,8 +46,9 @@ def _boto_config() -> Config:
 
 def _transfer_config() -> TransferConfig:
     return TransferConfig(
-        multipart_threshold=_SINGLE_PUT_MAX,
-        multipart_chunksize=64 * 1024 * 1024,
+        multipart_threshold=_MULTIPART_THRESHOLD,
+        multipart_chunksize=_MULTIPART_CHUNKSIZE,
+        max_concurrency=4,
     )
 
 
@@ -102,7 +104,7 @@ class B2Storage:
                 Key=key,
                 Body=data,
             )
-        except (ClientError, S3UploadFailedError) as exc:
+        except _UPLOAD_ERRORS as exc:
             raise _friendly_b2_error(exc) from exc
 
     async def save_file(self, key: str, src_path: str) -> None:
@@ -119,7 +121,7 @@ class B2Storage:
 
         try:
             await self._run(_upload)
-        except (ClientError, S3UploadFailedError) as exc:
+        except _UPLOAD_ERRORS as exc:
             raise _friendly_b2_error(_client_error(exc) or exc) from exc
         logger.info("Uploaded %s to B2 bucket %s", key, self.bucket)
 
