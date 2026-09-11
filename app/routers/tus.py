@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.database import get_session
 from app.deps import require_user
 from app.models import User
-from app.routers.upload import create_item_from_temp_file, run_processing
+from app.routers.upload import create_item_from_temp_file, schedule_processing
 from app.services.media_formats import validate_extension
 from app.services.rate_limit import rate_limit
 from app.services.tus_store import TusUpload, create, data_path, delete, load, save, write_concat
@@ -443,7 +443,6 @@ async def tus_commit(
     uid: str,
     request: Request,
     body: CommitBody,
-    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: User = Depends(require_user),
 ):
@@ -492,7 +491,7 @@ async def tus_commit(
         upload.metadata["description"] = description
         upload.metadata["published_at"] = published_at
         save(upload)
-        background_tasks.add_task(run_processing, item.id, str(path))
+        schedule_processing(item.id, str(path))
         return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
 

@@ -22,6 +22,7 @@
   const PARALLEL_MIN_SIZE = 16 * 1024 * 1024;
   const STALL_MS = 30000;
   const STALL_CHECK_MS = 5000;
+  const STALL_RESUME_MAX = 2;
 
   let activeUpload = null;
   let activeFile = null;
@@ -37,6 +38,8 @@
   let commitInFlight = false;
   let backgroundError = null;
   let startToken = 0;
+  let stallResumes = 0;
+  let ignoreAbort = false;
   let commitMeta = { title: '', description: '', published_at: '' };
 
   function show(el) {
@@ -112,6 +115,10 @@
     progressBar.value = pct;
     progressBar.setAttribute('aria-valuenow', String(pct));
     progressText.textContent = `${pct}%`;
+    if (pct >= 100) {
+      stopStallWatch();
+      setMessage('Finishing upload…');
+    }
   }
 
   function validateFile(file) {
@@ -252,21 +259,53 @@
 
   function startStallWatch(upload) {
     stopStallWatch();
+    if (!upload || bytesComplete || commitInFlight) return;
     lastProgressAt = Date.now();
     stallTimer = setInterval(() => {
       if (!activeUpload || !pendingCommit) {
         stopStallWatch();
         return;
       }
+      if (bytesComplete || commitInFlight) {
+        stopStallWatch();
+        return;
+      }
       if (Date.now() - lastProgressAt < STALL_MS) return;
       stopStallWatch();
+      resumeAfterStall(upload);
+    }, STALL_CHECK_MS);
+  }
+
+  function resumeAfterStall(upload) {
+    if (cancelled || bytesComplete || commitInFlight || !pendingCommit) return;
+    stallResumes += 1;
+    if (stallResumes > STALL_RESUME_MAX) {
       try {
         upload.abort();
       } catch {
         /* ignore */
       }
       handleFailure('Upload stalled. Submit again to resume from the last chunk.');
-    }, STALL_CHECK_MS);
+      return;
+    }
+    setMessage('Upload stalled — resuming…');
+    ignoreAbort = true;
+    try {
+      upload.abort();
+    } catch {
+      /* ignore */
+    }
+    queueMicrotask(() => {
+      ignoreAbort = false;
+    });
+    lastProgressAt = Date.now();
+    startStallWatch(upload);
+    try {
+      upload.start();
+    } catch (err) {
+      ignoreAbort = false;
+      handleFailure(err?.message || 'Upload stalled. Submit again to resume from the last chunk.');
+    }
   }
 
   function handleSuccess(mediaId) {
@@ -280,6 +319,8 @@
     commitInFlight = false;
     bytesComplete = false;
     backgroundError = null;
+    stallResumes = 0;
+    ignoreAbort = false;
     activeUpload = null;
     activeFile = null;
     setMessage('Upload complete — processing…');
@@ -298,6 +339,8 @@
     commitInFlight = false;
     activeUpload = null;
     backgroundError = null;
+    stallResumes = 0;
+    ignoreAbort = false;
     setMessage('');
     setError(msg || 'Upload failed. Please try again.');
     setStatusPolling(true);
@@ -327,6 +370,8 @@
     backgroundError = null;
     pendingCommit = false;
     commitInFlight = false;
+    stallResumes = 0;
+    ignoreAbort = false;
     lastLoaded = 0;
     lastTotal = 0;
     stopStallWatch();
@@ -343,6 +388,8 @@
       return;
     }
     commitInFlight = true;
+    stopStallWatch();
+    setMessage('Finishing upload…');
     try {
       const res = await fetch(`/files/${uid}/commit`, {
         method: 'POST',
@@ -390,6 +437,8 @@
     bytesComplete = false;
     backgroundError = null;
     commitInFlight = false;
+    stallResumes = 0;
+    ignoreAbort = false;
     lastLoaded = 0;
     lastTotal = file.size || 1;
     activeFile = file;
@@ -410,7 +459,7 @@
         filetype: file.type || 'application/octet-stream',
       },
       onError(error) {
-        if (token !== startToken || cancelled) return;
+        if (token !== startToken || cancelled || ignoreAbort) return;
         backgroundError = error;
         if (pendingCommit) {
           handleFailure(errorMessage(error));
@@ -426,8 +475,11 @@
       onSuccess() {
         if (token !== startToken || cancelled) return;
         bytesComplete = true;
-        if (pendingCommit) commitUpload(token);
-        else setStatusPolling(true);
+        stopStallWatch();
+        if (pendingCommit) {
+          setMessage('Finishing upload…');
+          commitUpload(token);
+        } else setStatusPolling(true);
       },
     });
 
@@ -585,15 +637,19 @@
 
     if (backgroundError || !sameFile(activeFile, file) || !activeUpload) {
       await startBackground(file);
-      if (activeUpload) startStallWatch(activeUpload);
+      if (activeUpload && !bytesComplete) startStallWatch(activeUpload);
+      else if (bytesComplete) setMessage('Finishing upload…');
       return;
     }
 
     applyCommitMetadata(activeUpload);
-    startStallWatch(activeUpload);
     if (bytesComplete) {
+      stopStallWatch();
+      setMessage('Finishing upload…');
       await commitUpload(startToken);
+      return;
     }
+    startStallWatch(activeUpload);
   });
 
   document.body.addEventListener('htmx:afterSwap', (event) => {

@@ -3,7 +3,6 @@ import base64
 from urllib.parse import urlparse
 
 import pytest
-from fastapi import BackgroundTasks
 from sqlmodel import select
 
 from app.models import MediaItem, MediaStatus, MediaType
@@ -37,6 +36,17 @@ def _upload_url(response) -> str:
 
 def _uid(path: str) -> str:
     return path.rsplit("/", 1)[-1]
+
+
+def _capture_processing(monkeypatch) -> list[tuple[int, str]]:
+    pending: list[tuple[int, str]] = []
+
+    def capture(media_id: int, temp_path: str) -> None:
+        pending.append((media_id, temp_path))
+
+    monkeypatch.setattr("app.routers.upload.schedule_processing", capture)
+    monkeypatch.setattr("app.routers.tus.schedule_processing", capture)
+    return pending
 
 
 AUDIO_PROBE = MediaProbe(
@@ -199,12 +209,7 @@ async def test_tus_chunked_resume_creates_media(auth_client, session, monkeypatc
     monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
     monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
 
-    pending: list[tuple] = []
-
-    def capture_task(self, func, *args, **kwargs):
-        pending.append((func, args, kwargs))
-
-    monkeypatch.setattr(BackgroundTasks, "add_task", capture_task)
+    pending = _capture_processing(monkeypatch)
 
     payload = b"abcdefgh"
     created = await auth_client.post(
@@ -246,14 +251,54 @@ async def test_tus_chunked_resume_creates_media(auth_client, session, monkeypatc
     media_id = incomplete.headers.get("x-media-id")
     assert media_id
     assert len(pending) == 1
-    _, args, _ = pending[0]
-    await process_media(session, args[0], args[1])
+    media_id_arg, temp_path = pending[0]
+    await process_media(session, media_id_arg, temp_path)
 
     result = await session.execute(select(MediaItem).where(MediaItem.id == int(media_id)))
     item = result.scalar_one()
     assert item.title == "Sunday talk"
     assert item.status == MediaStatus.ready
     assert item.media_type == MediaType.audio
+
+
+@pytest.mark.asyncio
+async def test_tus_commit_returns_before_processing(auth_client, monkeypatch):
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+
+    blocked = asyncio.Event()
+    started = asyncio.Event()
+
+    async def hang(_media_id: int, _temp_path: str) -> None:
+        started.set()
+        await blocked.wait()
+
+    monkeypatch.setattr("app.routers.upload.run_processing", hang)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    patched = await _patch(auth_client, path, payload, 0)
+    assert patched.status_code == 204
+
+    try:
+        commit = await asyncio.wait_for(
+            auth_client.post(f"{path}/commit", json={"title": "Sunday talk"}),
+            timeout=2,
+        )
+        assert commit.status_code == 204
+        assert commit.headers.get("x-media-id")
+        await asyncio.wait_for(started.wait(), timeout=1)
+    finally:
+        blocked.set()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -373,12 +418,7 @@ async def test_tus_parallel_large_patches_concat_commit(auth_client, session, mo
     monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
     monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
 
-    pending: list[tuple] = []
-
-    def capture_task(self, func, *args, **kwargs):
-        pending.append((func, args, kwargs))
-
-    monkeypatch.setattr(BackgroundTasks, "add_task", capture_task)
+    pending = _capture_processing(monkeypatch)
 
     part_size = 256 * 1024
     payloads = [bytes([i]) * part_size for i in range(4)]
@@ -426,8 +466,8 @@ async def test_tus_parallel_large_patches_concat_commit(auth_client, session, mo
     assert commit.status_code == 204
     media_id = commit.headers.get("x-media-id")
     assert media_id
-    _, args, _ = pending[0]
-    await process_media(session, args[0], args[1])
+    media_id_arg, temp_path = pending[0]
+    await process_media(session, media_id_arg, temp_path)
 
     result = await session.execute(select(MediaItem).where(MediaItem.id == int(media_id)))
     item = result.scalar_one()
@@ -473,12 +513,7 @@ async def test_tus_concat_then_commit(auth_client, session, monkeypatch):
     monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
     monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
 
-    pending: list[tuple] = []
-
-    def capture_task(self, func, *args, **kwargs):
-        pending.append((func, args, kwargs))
-
-    monkeypatch.setattr(BackgroundTasks, "add_task", capture_task)
+    pending = _capture_processing(monkeypatch)
 
     payload = b"abcdefgh"
     parts = []
@@ -521,8 +556,8 @@ async def test_tus_concat_then_commit(auth_client, session, monkeypatch):
     assert commit.status_code == 204
     media_id = commit.headers.get("x-media-id")
     assert media_id
-    _, args, _ = pending[0]
-    await process_media(session, args[0], args[1])
+    media_id_arg, temp_path = pending[0]
+    await process_media(session, media_id_arg, temp_path)
 
     result = await session.execute(select(MediaItem).where(MediaItem.id == int(media_id)))
     item = result.scalar_one()
@@ -623,5 +658,5 @@ async def test_upload_page_includes_tus(auth_client):
     r = await auth_client.get("/upload")
     assert r.status_code == 200
     assert "/static/vendor/tus/tus.min.js" in r.text
-    assert "/static/js/upload.js?v=2" in r.text
+    assert "/static/js/upload.js?v=3" in r.text
     assert "Transfer starts when you choose a file" in r.text

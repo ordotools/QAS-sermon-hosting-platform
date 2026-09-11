@@ -1,9 +1,11 @@
+import asyncio
+import logging
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -23,6 +25,8 @@ from app.services.media_formats import (
 from app.services.rate_limit import rate_limit
 from app.templating import templates
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["upload"])
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
@@ -34,6 +38,22 @@ async def run_processing(media_id: int, temp_path: str) -> None:
             await process_media(session, media_id, temp_path)
     finally:
         Path(str(temp_path) + ".info").unlink(missing_ok=True)
+
+
+def _log_processing_task(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.exception("Media processing task failed", exc_info=exc)
+
+
+def schedule_processing(media_id: int, temp_path: str) -> None:
+    task = asyncio.create_task(
+        run_processing(media_id, temp_path),
+        name=f"process-media-{media_id}",
+    )
+    task.add_done_callback(_log_processing_task)
 
 
 async def create_item_from_temp_file(
@@ -65,7 +85,7 @@ async def create_item_from_temp_file(
     if not ffprobe_available():
         return None, media_tools_error(), status.HTTP_503_SERVICE_UNAVAILABLE
 
-    probe = probe_media(temp_path)
+    probe = await asyncio.to_thread(probe_media, temp_path)
     validation_error = validate_probe(probe)
     if validation_error:
         return None, validation_error, status.HTTP_400_BAD_REQUEST
@@ -169,7 +189,6 @@ async def upload_status(
 @router.post("/upload")
 async def upload_media(
     request: Request,
-    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: User = Depends(require_user),
     title: str = Form(...),
@@ -231,7 +250,7 @@ async def upload_media(
         Path(temp_path).unlink(missing_ok=True)
         raise
 
-    background_tasks.add_task(run_processing, item.id, temp_path)
+    schedule_processing(item.id, temp_path)
 
     if _wants_json(request):
         return JSONResponse({"ok": True, "media_id": item.id})

@@ -172,7 +172,6 @@ async def test_upload_rejects_garbage_bytes_json(auth_client):
 
 @pytest.mark.asyncio
 async def test_upload_valid_mp3_creates_ready_record(auth_client, session, monkeypatch):
-    from fastapi import BackgroundTasks
     from sqlmodel import select
 
     from app.models import MediaItem, MediaStatus, MediaType
@@ -192,12 +191,12 @@ async def test_upload_valid_mp3_creates_ready_record(auth_client, session, monke
     monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: mp3_probe)
     monkeypatch.setattr("app.services.media.probe_media", lambda _path: mp3_probe)
 
-    pending: list[tuple] = []
+    pending: list[tuple[int, str]] = []
 
-    def capture_task(self, func, *args, **kwargs):
-        pending.append((func, args, kwargs))
+    def capture(media_id: int, temp_path: str) -> None:
+        pending.append((media_id, temp_path))
 
-    monkeypatch.setattr(BackgroundTasks, "add_task", capture_task)
+    monkeypatch.setattr("app.routers.upload.schedule_processing", capture)
 
     r = await auth_client.post(
         "/upload",
@@ -211,8 +210,8 @@ async def test_upload_valid_mp3_creates_ready_record(auth_client, session, monke
     media_id = body["media_id"]
 
     assert len(pending) == 1
-    _, args, _ = pending[0]
-    await process_media(session, args[0], args[1])
+    media_id_arg, temp_path = pending[0]
+    await process_media(session, media_id_arg, temp_path)
 
     result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
     item = result.scalar_one()
