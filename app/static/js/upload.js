@@ -21,7 +21,7 @@
   const ALLOWED_EXT = ['.mp4', '.mov', '.m4a', '.mp3', '.webm', '.ogg'];
   const CHUNK_SIZE = 8 * 1024 * 1024;
   const PARALLEL_MIN_SIZE = 16 * 1024 * 1024;
-  const STALL_MS = 30000;
+  const STALL_MS = 90000;
   const STALL_CHECK_MS = 5000;
   const STALL_RESUME_MAX = 2;
   const ETA_WINDOW_MS = 8000;
@@ -284,7 +284,8 @@
   }
 
   async function requestWakeLock() {
-    if (!pendingCommit || !navigator.wakeLock?.request) return;
+    if (!navigator.wakeLock?.request) return;
+    if (wakeLock) return;
     try {
       wakeLock = await navigator.wakeLock.request('screen');
       wakeLock.addEventListener('release', () => {
@@ -509,8 +510,8 @@
     const upload = new tus.Upload(file, {
       endpoint: '/files',
       chunkSize: CHUNK_SIZE,
-      parallelUploads: file.size > PARALLEL_MIN_SIZE ? 4 : 1,
-      retryDelays: [0, 1000, 3000, 5000],
+      parallelUploads: file.size > PARALLEL_MIN_SIZE ? 2 : 1,
+      retryDelays: [1000, 3000, 5000, 10000, 20000],
       storeFingerprintForResuming: true,
       removeFingerprintOnSuccess: true,
       metadata: {
@@ -568,6 +569,7 @@
         if (pendingCommit) setMessage('Resuming previous upload…');
       }
       upload.start();
+      requestWakeLock();
     } catch (err) {
       if (token !== startToken || cancelled) return;
       backgroundError = err;
@@ -718,7 +720,7 @@
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && pendingCommit && activeUpload) {
+    if (document.visibilityState === 'visible' && activeUpload) {
       requestWakeLock();
     }
   });

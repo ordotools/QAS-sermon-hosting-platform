@@ -60,7 +60,7 @@ Rejected: images (`.heic`, `.jpg`, etc.), documents, archives, corrupt/unreadabl
 
 iPhone video (`.mov`) and voice memos (`.m4a`) are supported; files are converted automatically for web playback.
 
-**Upload UX:** choosing a file starts a silent tus transfer immediately (up to 4 parallel 8 MB chunks for files over 16 MB). Changing the file aborts the old upload and starts the new one. Submit (with a title) commits the transfer — if bytes are already there, processing starts right away. If the connection drops, submit again to resume. After commit, the status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Keep the upload page open on iPhone (the screen stays awake after you submit). Large iPhone 4K HEVC files may take several minutes to transcode.
+**Upload UX:** choosing a file starts a silent tus transfer immediately (up to 2 parallel 8 MB chunks for files over 16 MB). Changing the file aborts the old upload and starts the new one. Submit (with a title) commits the transfer — if bytes are already there, processing starts right away. If the connection drops, submit again to resume. After commit, the status poll shows transcoding and thumbnail generation (`processing` → `ready` / `failed`). Keep the upload page open on iPhone (the screen stays awake while the file is transferring). Large iPhone HEVC files are scaled to 1080p H.264 and may take several minutes.
 
 ## Docker (PostgreSQL)
 
@@ -144,8 +144,10 @@ Use the S3-compatible endpoint for your bucket region. Streams always go through
 - Terminate TLS at nginx/Caddy (required for service workers)
 - Set a strong `SECRET_KEY`
 - Default `MAX_UPLOAD_SIZE_MB=1500`. Prefer 1080p HEVC; 15-minute 1080p and 4K can still exceed 1.5 GB.
+- Give the Coolify host **≥2 GB RAM** (4 GB is safer for 4K HEVC) and disk headroom of **at least 2× the upload size** on the `media_data` volume (tus scratch + transcode).
 - Run with a single uvicorn worker (in-memory rate limits and background transcoding/thumbnails are per-process; uploads queue behind each other)
 - Uploads use short tus PATCH chunks, so Coolify/Caddy/Traefik do not need a giant proxy timeout for iPhone videos
+- ffmpeg temps go to `LOCAL_STORAGE_PATH/.scratch` (`TMPDIR` in compose), not the container overlay `/tmp`
 
 ## PWA manual QA
 

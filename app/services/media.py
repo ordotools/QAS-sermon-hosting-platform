@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.config import get_settings
 from app.models import MediaItem, MediaStatus, MediaType
 from app.services.media_formats import (
     _resolve_binary,
@@ -36,20 +37,43 @@ def detect_media_type(mime_type: str) -> MediaType:
     return MediaType.audio
 
 
+def scratch_dir() -> Path:
+    path = Path(get_settings().local_storage_path) / ".scratch"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _scratch_temp(suffix: str) -> str:
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=scratch_dir())
+    handle.close()
+    return handle.name
+
+
+def _processing_error_message(exc: BaseException) -> str:
+    if isinstance(exc, OSError) and exc.errno == 28:
+        return "Disk full while processing the file."
+    text = str(exc).strip() or type(exc).__name__
+    return text[:500]
+
+
 def _generate_thumbnail(src_path: str, media_type: MediaType, duration: float | None) -> str | None:
     if media_type == MediaType.audio:
         return None
-    thumb_path = tempfile.mktemp(suffix=".jpg")
+    thumb_path = _scratch_temp(".jpg")
     seek = 5.0
     if duration and duration < 10:
         seek = max(duration / 2, 0.5)
     try:
         ffmpeg = _resolve_binary("ffmpeg")
         if ffmpeg is None:
+            Path(thumb_path).unlink(missing_ok=True)
             return None
-        subprocess.run(
+        result = subprocess.run(
             [
                 ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
                 "-y",
                 "-ss",
                 str(seek),
@@ -62,10 +86,14 @@ def _generate_thumbnail(src_path: str, media_type: MediaType, duration: float | 
                 thumb_path,
             ],
             capture_output=True,
-            check=True,
+            check=False,
         )
+        if result.returncode != 0:
+            Path(thumb_path).unlink(missing_ok=True)
+            return None
         return thumb_path
-    except (subprocess.CalledProcessError, OSError):
+    except OSError:
+        Path(thumb_path).unlink(missing_ok=True)
         return None
 
 
@@ -147,8 +175,7 @@ def _prepare_output(
         out_mime: str | None = None
         if needs_transcode(probe):
             suffix = ".mp4" if probe.media_type == MediaType.video else ".m4a"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                transcode_path = tmp.name
+            transcode_path = _scratch_temp(suffix)
             if probe.media_type == MediaType.video:
                 if can_remux_video_to_mp4(probe):
                     remux_video_to_mp4(temp_path, transcode_path)
@@ -203,6 +230,7 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
 
         if prepared.error:
             item.status = MediaStatus.failed
+            item.processing_error = prepared.error[:500]
             item.updated_at = datetime.utcnow()
             return
 
@@ -223,13 +251,15 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
 
         item.duration_seconds = prepared.duration
         item.status = MediaStatus.ready
+        item.processing_error = None
         item.updated_at = datetime.utcnow()
-    except Exception:
+    except Exception as exc:
         logger.exception("Media processing failed for item %s", media_id)
         result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
         item = result.scalar_one_or_none()
         if item:
             item.status = MediaStatus.failed
+            item.processing_error = _processing_error_message(exc)
             item.updated_at = datetime.utcnow()
     finally:
         Path(temp_path).unlink(missing_ok=True)

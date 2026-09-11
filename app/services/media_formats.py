@@ -271,14 +271,28 @@ def can_remux_video_to_mp4(probe: MediaProbe) -> bool:
     return _container_needs_transcode(probe.container)
 
 
-def remux_video_to_mp4(src: str, dest: str) -> None:
+def _run_ffmpeg(args: list[str]) -> None:
     ffmpeg = _resolve_binary("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found")
 
-    subprocess.run(
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", *args]
+    result = subprocess.run(cmd, capture_output=True, check=False)
+    if result.returncode == 0:
+        return
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    tail = stderr[-4000:] if stderr else ""
+    logger.error("ffmpeg failed (exit %s): %s", result.returncode, tail or "(no stderr)")
+    if result.returncode == -9:
+        raise RuntimeError(
+            "Processing ran out of memory. Try a 1080p file or a smaller upload."
+        )
+    raise RuntimeError(tail[:500] if tail else f"ffmpeg failed (exit {result.returncode})")
+
+
+def remux_video_to_mp4(src: str, dest: str) -> None:
+    _run_ffmpeg(
         [
-            ffmpeg,
             "-y",
             "-i",
             src,
@@ -287,52 +301,45 @@ def remux_video_to_mp4(src: str, dest: str) -> None:
             "-movflags",
             "+faststart",
             dest,
-        ],
-        capture_output=True,
-        check=True,
+        ]
     )
 
 
-def transcode_video(src: str, dest: str) -> None:
-    ffmpeg = _resolve_binary("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg not found")
+VIDEO_SCALE_FILTER = "scale=-2:trunc(min(1080,ih)/2)*2"
 
-    subprocess.run(
+
+def transcode_video(src: str, dest: str) -> None:
+    _run_ffmpeg(
         [
-            ffmpeg,
             "-y",
             "-i",
             src,
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "veryfast",
             "-crf",
             "23",
             "-pix_fmt",
             "yuv420p",
+            "-vf",
+            VIDEO_SCALE_FILTER,
             "-c:a",
             "aac",
             "-b:a",
             "128k",
+            "-threads",
+            "0",
             "-movflags",
             "+faststart",
             dest,
-        ],
-        capture_output=True,
-        check=True,
+        ]
     )
 
 
 def transcode_audio(src: str, dest: str) -> None:
-    ffmpeg = _resolve_binary("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg not found")
-
-    subprocess.run(
+    _run_ffmpeg(
         [
-            ffmpeg,
             "-y",
             "-i",
             src,
@@ -341,9 +348,7 @@ def transcode_audio(src: str, dest: str) -> None:
             "-b:a",
             "128k",
             dest,
-        ],
-        capture_output=True,
-        check=True,
+        ]
     )
 
 

@@ -106,6 +106,36 @@ async def test_upload_status_partial(auth_client):
 
 
 @pytest.mark.asyncio
+async def test_upload_status_shows_processing_error(auth_client, session):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+
+    user = await get_user_by_email(session, "user@test.com")
+    session.add(
+        MediaItem(
+            title="Huge file",
+            media_type=MediaType.video,
+            published_at=datetime.utcnow(),
+            storage_key="media/gone.mp4",
+            mime_type="video/mp4",
+            file_size=1,
+            uploaded_by_id=user.id,
+            status=MediaStatus.failed,
+            processing_error="Disk full while processing the file.",
+        )
+    )
+    await session.commit()
+
+    r = await auth_client.get("/upload/status")
+    assert r.status_code == 200
+    assert "failed" in r.text
+    assert "Disk full while processing the file." in r.text
+    assert "status-error" in r.text
+
+
+@pytest.mark.asyncio
 async def test_upload_rejects_invalid_date(auth_client):
     r = await auth_client.post(
         "/upload",

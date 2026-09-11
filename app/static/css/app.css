@@ -142,6 +142,7 @@ body {
 .badge-ready { background: #c6f6d5; }
 .badge-processing { background: #fefcbf; }
 .badge-failed { background: #fed7d7; }
+.status-error { flex-basis: 100%; font-size: 0.85rem; color: var(--error); }
 
 .status-list, .admin-list { list-style: none; padding: 0; }
 .status-list li, .admin-list li { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }

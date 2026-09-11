@@ -6,10 +6,15 @@ import pytest
 from sqlmodel import select
 
 from app.models import MediaItem, MediaStatus, MediaType
-from app.routers.tus import _read_patch_bytes, decode_upload_metadata
+from app.routers.tus import (
+    PatchIncomplete,
+    PatchTooLarge,
+    _stream_patch_to_file,
+    decode_upload_metadata,
+)
 from app.services.media import process_media
 from app.services.media_formats import MediaProbe
-from app.services.tus_store import load
+from app.services.tus_store import data_path, load
 
 
 def _meta(**fields: str) -> str:
@@ -126,7 +131,7 @@ async def test_tus_rejects_oversized_length(auth_client):
         "/files",
         headers=_tus_headers(
             **{
-                "Upload-Length": str(501 * 1024 * 1024),
+                "Upload-Length": str(1501 * 1024 * 1024),
                 "Upload-Metadata": _meta(filename="talk.mp3", title="Sunday"),
             }
         ),
@@ -338,6 +343,42 @@ async def test_upload_status_responsive_during_processing(auth_client, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_process_media_stores_exception_message(auth_client, session, monkeypatch):
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("ffmpeg failed: encoder exploded")
+
+    monkeypatch.setattr(media_svc, "_prepare_output", boom)
+    pending = _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    await _patch(auth_client, path, payload, 0)
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Boom talk"})
+    assert commit.status_code == 204
+    media_id, temp_path = pending[0]
+    await process_media(session, media_id, temp_path)
+
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.status == MediaStatus.failed
+    assert item.processing_error == "ffmpeg failed: encoder exploded"
+
+
+@pytest.mark.asyncio
 async def test_tus_commit_incomplete_conflicts(auth_client):
     created = await auth_client.post(
         "/files",
@@ -399,7 +440,9 @@ class _FakePatchRequest:
 
 
 @pytest.mark.asyncio
-async def test_read_patch_bytes_drains_trailing_more_body():
+async def test_stream_patch_writes_complete_chunk(tmp_path):
+    path = tmp_path / "upload"
+    path.write_bytes(b"")
     body = b"x" * 256
     req = _FakePatchRequest(
         [
@@ -408,12 +451,16 @@ async def test_read_patch_bytes_drains_trailing_more_body():
         ],
         content_length=256,
     )
-    assert await _read_patch_bytes(req, 256) == body
+    written = await _stream_patch_to_file(req, path, 0, 256)
+    assert written == 256
+    assert path.read_bytes() == body
     assert req._messages == []
 
 
 @pytest.mark.asyncio
-async def test_read_patch_bytes_drains_before_rejecting_oversize():
+async def test_stream_patch_drains_before_rejecting_oversize(tmp_path):
+    path = tmp_path / "upload"
+    path.write_bytes(b"keep")
     req = _FakePatchRequest(
         [
             {"type": "http.request", "body": b"a" * 100, "more_body": True},
@@ -421,9 +468,79 @@ async def test_read_patch_bytes_drains_before_rejecting_oversize():
         ],
         content_length=200,
     )
-    with pytest.raises(ValueError, match="too large"):
-        await _read_patch_bytes(req, 50)
+    with pytest.raises(PatchTooLarge, match="too large"):
+        await _stream_patch_to_file(req, path, 0, 50)
     assert req._messages == []
+    assert path.read_bytes() == b"keep"
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_disconnect_does_not_commit_offset(tmp_path):
+    path = tmp_path / "upload"
+    path.write_bytes(b"ABCD")
+    req = _FakePatchRequest(
+        [
+            {"type": "http.request", "body": b"ef", "more_body": True},
+            {"type": "http.disconnect"},
+        ],
+        content_length=4,
+    )
+    with pytest.raises(PatchIncomplete):
+        await _stream_patch_to_file(req, path, 4, 4)
+    assert path.read_bytes() == b"ABCD"
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_short_body_does_not_commit(tmp_path):
+    path = tmp_path / "upload"
+    path.write_bytes(b"")
+    req = _FakePatchRequest(
+        [
+            {"type": "http.request", "body": b"ab", "more_body": False},
+        ],
+        content_length=8,
+    )
+    with pytest.raises(PatchIncomplete):
+        await _stream_patch_to_file(req, path, 0, 8)
+    assert path.read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_tus_incomplete_patch_leaves_offset_unchanged(auth_client, monkeypatch):
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": "8",
+                "Upload-Metadata": _meta(filename="talk.mp3"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    uid = _uid(path)
+    first = await _patch(auth_client, path, b"abcd", 0)
+    assert first.status_code == 204
+    assert load(uid).offset == 4
+
+    from app.routers import tus as tus_mod
+
+    original = tus_mod._stream_patch_to_file
+
+    async def disconnecting(request, file_path, offset, max_bytes):
+        req = _FakePatchRequest(
+            [
+                {"type": "http.request", "body": b"ef", "more_body": True},
+                {"type": "http.disconnect"},
+            ],
+            content_length=4,
+        )
+        return await original(req, file_path, offset, max_bytes)
+
+    monkeypatch.setattr(tus_mod, "_stream_patch_to_file", disconnecting)
+    interrupted = await _patch(auth_client, path, b"efgh", 4)
+    assert interrupted.status_code == 400
+    assert load(uid).offset == 4
+    assert data_path(uid).read_bytes()[:4] == b"abcd"
 
 
 @pytest.mark.asyncio

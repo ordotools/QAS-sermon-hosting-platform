@@ -54,5 +54,6 @@ class MediaItem(SQLModel, table=True):
     duration_seconds: Optional[float] = None
     uploaded_by_id: int = Field(foreign_key="user.id")
     status: MediaStatus = MediaStatus.processing
+    processing_error: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

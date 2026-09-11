@@ -3,6 +3,9 @@
   <li data-media-id="{{ item.id }}">
     <span>{{ item.title }}</span>
     <span class="badge badge-{{ item.status.value }}">{{ item.status.value }}</span>
+    {% if item.status.value == "failed" and item.processing_error %}
+    <span class="status-error">{{ item.processing_error }}</span>
+    {% endif %}
   </li>
   {% endfor %}
 </ul>

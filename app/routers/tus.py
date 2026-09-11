@@ -150,6 +150,15 @@ def _location(request: Request, uid: str) -> str:
     return str(request.base_url).rstrip("/") + f"/files/{uid}"
 
 
+class PatchIncomplete(Exception):
+    """Client disconnected or sent fewer bytes than Content-Length."""
+
+
+class PatchTooLarge(ValueError):
+    def __init__(self) -> None:
+        super().__init__("chunk too large")
+
+
 async def _drain_request(request: Request) -> None:
     while True:
         message = await request.receive()
@@ -159,37 +168,63 @@ async def _drain_request(request: Request) -> None:
             return
 
 
-async def _read_patch_bytes(request: Request, max_bytes: int) -> bytes:
-    expected = _parse_length(request.headers.get("content-length"))
-    chunks: list[bytes] = []
-    total = 0
-    too_large = expected is not None and expected > max_bytes
-    while True:
-        message = await request.receive()
-        if message["type"] == "http.disconnect":
-            break
-        if message["type"] != "http.request":
-            continue
-        piece = message.get("body", b"")
-        if piece:
-            total += len(piece)
-            if total > max_bytes:
-                too_large = True
-            if not too_large:
-                chunks.append(piece)
-        if not message.get("more_body", False):
-            break
-    if too_large:
-        raise ValueError("chunk too large")
-    return b"".join(chunks)
-
-
-def _write_patch_bytes(path: Path, offset: int, body: bytes) -> None:
+def _truncate_upload(path: Path, size: int) -> None:
+    if not path.is_file():
+        return
     with path.open("r+b") as handle:
-        handle.seek(offset)
-        if body:
-            handle.write(body)
+        handle.truncate(size)
         handle.flush()
+
+
+async def _stream_patch_to_file(
+    request: Request,
+    path: Path,
+    offset: int,
+    max_bytes: int,
+) -> int:
+    expected = _parse_length(request.headers.get("content-length"))
+    if expected is not None and expected > max_bytes:
+        await _drain_request(request)
+        raise PatchTooLarge()
+
+    written = 0
+    disconnected = False
+    too_large = False
+    try:
+        with path.open("r+b") as handle:
+            handle.seek(offset)
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    disconnected = True
+                    break
+                if message["type"] != "http.request":
+                    continue
+                piece = message.get("body", b"")
+                if piece:
+                    if written + len(piece) > max_bytes:
+                        too_large = True
+                    elif not too_large:
+                        handle.write(piece)
+                        written += len(piece)
+                if not message.get("more_body", False):
+                    break
+            if too_large or disconnected or (
+                expected is not None and written != expected
+            ):
+                handle.truncate(offset)
+                handle.flush()
+            else:
+                handle.flush()
+    except Exception:
+        _truncate_upload(path, offset)
+        raise
+
+    if too_large:
+        raise PatchTooLarge()
+    if disconnected or (expected is not None and written != expected):
+        raise PatchIncomplete()
+    return written
 
 
 def _offset_headers(upload: TusUpload, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -414,26 +449,20 @@ async def tus_patch(
         prev = upload.offset
         remaining = upload.size - prev
         try:
-            body = await _read_patch_bytes(request, remaining)
-        except ValueError:
+            written = await _stream_patch_to_file(request, path, prev, remaining)
+        except PatchTooLarge:
             return _tus_error(
                 "Chunk exceeds remaining upload length",
                 status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
+        except PatchIncomplete:
+            return _tus_error("Upload interrupted", status.HTTP_400_BAD_REQUEST)
         except Exception:
-            logger.exception("tus PATCH read failed for %s", uid)
-            return _tus_error("Upload interrupted", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        try:
-            await asyncio.to_thread(_write_patch_bytes, path, prev, body)
-        except Exception:
-            if path.is_file():
-                with path.open("r+b") as handle:
-                    handle.truncate(prev)
+            _truncate_upload(path, prev)
             logger.exception("tus PATCH failed for %s", uid)
             return _tus_error("Upload interrupted", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        upload.offset = prev + len(body)
+        upload.offset = prev + written
         save(upload)
         return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 

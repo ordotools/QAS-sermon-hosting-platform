@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
-
+import subprocess
 from pathlib import Path
 
+import pytest
+
 from app.models import MediaType
+
 from app.services.media_formats import (
+    VIDEO_SCALE_FILTER,
     MediaProbe,
     _resolve_binary,
     ffprobe_available,
@@ -260,6 +263,43 @@ def test_probe_real_mov_file() -> None:
 
 def test_media_tools_error_message() -> None:
     assert "ffmpeg" in media_tools_error().lower()
+
+
+def test_transcode_video_uses_veryfast_1080p(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "app.services.media_formats._resolve_binary", lambda _name: "/usr/bin/ffmpeg"
+    )
+
+    def fake_run(cmd, **_kwargs):
+        captured.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr("app.services.media_formats.subprocess.run", fake_run)
+    from app.services.media_formats import transcode_video
+
+    transcode_video("in.mov", "out.mp4")
+    cmd = captured[0]
+    assert cmd[:4] == ["/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "error"]
+    assert "-preset" in cmd and "veryfast" in cmd
+    assert VIDEO_SCALE_FILTER in cmd
+    assert "-threads" in cmd
+
+
+def test_run_ffmpeg_logs_oom(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.media_formats._resolve_binary", lambda _name: "/usr/bin/ffmpeg"
+    )
+
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, -9, b"", b"killed")
+
+    monkeypatch.setattr("app.services.media_formats.subprocess.run", fake_run)
+    from app.services.media_formats import _run_ffmpeg
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        _run_ffmpeg(["-y", "-i", "in", "out"])
 
 
 def test_normalize_storage_key() -> None:
