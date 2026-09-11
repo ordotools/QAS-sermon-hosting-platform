@@ -3,15 +3,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.config import get_settings
 from app.database import async_session, init_db
 from app.routers import admin, auth, public, stream, tus, upload
+from app.routers.upload import schedule_processing
 from app.services.auth import bootstrap_superuser
+from app.services.media import cleanup_abandoned_temps, recover_stale_processing
 from app.services.media_formats import ffprobe_available, media_tools_error
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     async with async_session() as session:
         await bootstrap_superuser(session, settings.superuser_email, settings.superuser_password)
+        to_retry = await recover_stale_processing(session, older_than_minutes=0)
+        await cleanup_abandoned_temps(session)
+    for media_id, temp_path in to_retry:
+        logger.info("Re-queueing interrupted processing for media %s", media_id)
+        schedule_processing(media_id, temp_path)
     logger.info("Storage backend: %s", settings.storage_backend)
+    if settings.storage_backend == "b2":
+        try:
+            await get_storage().check()
+        except Exception:
+            logger.exception(
+                "B2 bucket check failed (endpoint=%s bucket=%s). "
+                "GET /health will fail until this is fixed.",
+                settings.b2_endpoint,
+                settings.b2_bucket,
+            )
     if not ffprobe_available():
         logger.warning(media_tools_error())
     yield
@@ -46,7 +64,23 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "storage": get_settings().storage_backend}
+    settings = get_settings()
+    payload = {"status": "ok", "storage": settings.storage_backend}
+    if settings.storage_backend != "b2":
+        return payload
+    try:
+        await get_storage().check()
+    except Exception as exc:
+        logger.exception("B2 health check failed")
+        return JSONResponse(
+            {
+                "status": "error",
+                "storage": "b2",
+                "error": str(exc) or type(exc).__name__,
+            },
+            status_code=503,
+        )
+    return payload
 
 
 @app.get("/manifest.webmanifest")

@@ -163,7 +163,7 @@ pytest
 
 ## Health check
 
-`GET /health` → `{"status": "ok"}`
+`GET /health` → `{"status": "ok", "storage": "local"}` (or `"b2"`). HTTP 503 if the B2 backend is unreachable.
 
 ## Project layout
 

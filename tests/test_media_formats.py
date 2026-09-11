@@ -267,13 +267,15 @@ def test_media_tools_error_message() -> None:
 
 def test_transcode_video_uses_veryfast_1080p(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
+    captured_kwargs: list[dict] = []
 
     monkeypatch.setattr(
         "app.services.media_formats._resolve_binary", lambda _name: "/usr/bin/ffmpeg"
     )
 
-    def fake_run(cmd, **_kwargs):
+    def fake_run(cmd, **kwargs):
         captured.append(list(cmd))
+        captured_kwargs.append(kwargs)
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
     monkeypatch.setattr("app.services.media_formats.subprocess.run", fake_run)
@@ -285,6 +287,10 @@ def test_transcode_video_uses_veryfast_1080p(monkeypatch: pytest.MonkeyPatch) ->
     assert "-preset" in cmd and "veryfast" in cmd
     assert VIDEO_SCALE_FILTER in cmd
     assert "-threads" in cmd
+    assert cmd[cmd.index("-threads") + 1] == "2"
+    from app.services.media_formats import FFMPEG_TIMEOUT_SECONDS
+
+    assert captured_kwargs[0].get("timeout") == FFMPEG_TIMEOUT_SECONDS
 
 
 def test_run_ffmpeg_logs_oom(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,6 +305,21 @@ def test_run_ffmpeg_logs_oom(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.media_formats import _run_ffmpeg
 
     with pytest.raises(RuntimeError, match="out of memory"):
+        _run_ffmpeg(["-y", "-i", "in", "out"])
+
+
+def test_run_ffmpeg_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.media_formats._resolve_binary", lambda _name: "/usr/bin/ffmpeg"
+    )
+
+    def fake_run(cmd, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr("app.services.media_formats.subprocess.run", fake_run)
+    from app.services.media_formats import _run_ffmpeg
+
+    with pytest.raises(RuntimeError, match="timed out"):
         _run_ffmpeg(["-y", "-i", "in", "out"])
 
 

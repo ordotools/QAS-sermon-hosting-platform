@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -46,12 +47,16 @@ def _uid(path: str) -> str:
 def _capture_processing(monkeypatch) -> list[tuple[int, str]]:
     pending: list[tuple[int, str]] = []
 
-    def capture(media_id: int, temp_path: str) -> None:
+    def capture(media_id: int, temp_path: str, _probe=None) -> None:
         pending.append((media_id, temp_path))
 
     monkeypatch.setattr("app.routers.upload.schedule_processing", capture)
     monkeypatch.setattr("app.routers.tus.schedule_processing", capture)
     return pending
+
+
+async def _instant_sleep(_seconds: float) -> None:
+    return None
 
 
 AUDIO_PROBE = MediaProbe(
@@ -273,7 +278,7 @@ async def test_tus_commit_returns_before_processing(auth_client, monkeypatch):
     blocked = asyncio.Event()
     started = asyncio.Event()
 
-    async def hang(_media_id: int, _temp_path: str) -> None:
+    async def hang(_media_id: int, _temp_path: str, _probe=None) -> None:
         started.set()
         await blocked.wait()
 
@@ -376,6 +381,140 @@ async def test_process_media_stores_exception_message(auth_client, session, monk
     item = result.scalar_one()
     assert item.status == MediaStatus.failed
     assert item.processing_error == "ffmpeg failed: encoder exploded"
+
+
+@pytest.mark.asyncio
+async def test_process_media_keeps_scratch_on_save_failure(auth_client, session, monkeypatch):
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr(media_svc.asyncio, "sleep", _instant_sleep)
+
+    calls = {"n": 0}
+
+    class FakeStorage:
+        async def save_file(self, key, path):
+            calls["n"] += 1
+            raise RuntimeError("B2 down")
+
+    monkeypatch.setattr(media_svc, "get_storage", lambda: FakeStorage())
+    pending = _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    await _patch(auth_client, path, payload, 0)
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Keep scratch"})
+    assert commit.status_code == 204
+    media_id, temp_path = pending[0]
+    assert Path(temp_path).exists()
+    await process_media(session, media_id, temp_path)
+
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.status == MediaStatus.failed
+    assert item.processing_error.startswith("Retryable upload failure:")
+    assert "B2 down" in item.processing_error
+    assert calls["n"] == 3
+    assert Path(temp_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_process_media_retries_save_then_deletes_scratch(auth_client, session, monkeypatch):
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr(media_svc.asyncio, "sleep", _instant_sleep)
+
+    calls = {"n": 0}
+
+    class FakeStorage:
+        async def save_file(self, key, path):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise RuntimeError("blip")
+
+    monkeypatch.setattr(media_svc, "get_storage", lambda: FakeStorage())
+    pending = _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    await _patch(auth_client, path, payload, 0)
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Retry save"})
+    assert commit.status_code == 204
+    media_id, temp_path = pending[0]
+    await process_media(session, media_id, temp_path)
+
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.status == MediaStatus.ready
+    assert calls["n"] == 2
+    assert not Path(temp_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_process_media_ready_without_thumb_if_thumb_upload_fails(
+    auth_client, session, monkeypatch, tmp_path
+):
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr(media_svc.asyncio, "sleep", _instant_sleep)
+
+    thumb = tmp_path / "thumb.jpg"
+    thumb.write_bytes(b"jpeg")
+    monkeypatch.setattr(media_svc, "_generate_thumbnail", lambda *_a, **_k: str(thumb))
+
+    class FakeStorage:
+        async def save_file(self, key, path):
+            if str(key).startswith("thumbnails/"):
+                raise RuntimeError("thumb fail")
+
+    monkeypatch.setattr(media_svc, "get_storage", lambda: FakeStorage())
+    pending = _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    await _patch(auth_client, path, payload, 0)
+    commit = await auth_client.post(f"{path}/commit", json={"title": "No thumb"})
+    assert commit.status_code == 204
+    media_id, temp_path = pending[0]
+    await process_media(session, media_id, temp_path)
+
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.status == MediaStatus.ready
+    assert item.thumbnail_key is None
+    assert not Path(temp_path).exists()
 
 
 @pytest.mark.asyncio
@@ -811,6 +950,357 @@ async def test_upload_page_includes_tus(auth_client):
     r = await auth_client.get("/upload")
     assert r.status_code == 200
     assert "/static/vendor/tus/tus.min.js" in r.text
-    assert "/static/js/upload.js?v=4" in r.text
+    assert "/static/js/upload.js?v=5" in r.text
     assert 'id="upload-eta"' in r.text
     assert "Transfer starts when you choose a file" in r.text
+
+
+def test_write_concat_renames_single_part(tmp_path, monkeypatch):
+    from app.services import tus_store
+
+    monkeypatch.setattr(tus_store, "tus_dir", lambda: tmp_path)
+    part = tus_store.TusUpload(
+        uid="a" * 32,
+        size=5,
+        offset=5,
+        metadata={},
+        user_id=1,
+        concat="partial",
+    )
+    tus_store.create(part)
+    tus_store.data_path(part.uid).write_bytes(b"hello")
+    src_ino = tus_store.data_path(part.uid).stat().st_ino
+    dest = tus_store.TusUpload(
+        uid="b" * 32,
+        size=5,
+        offset=0,
+        metadata={"filename": "talk.mp3"},
+        user_id=1,
+    )
+    tus_store.write_concat(dest, [part.uid])
+    dest_path = tus_store.data_path(dest.uid)
+    assert dest_path.read_bytes() == b"hello"
+    assert dest_path.stat().st_ino == src_ino
+    assert not tus_store.data_path(part.uid).exists()
+    loaded = tus_store.load(dest.uid)
+    assert loaded is not None
+    assert loaded.offset == 5
+
+
+def test_write_concat_copies_multiple_parts(tmp_path, monkeypatch):
+    from app.services import tus_store
+
+    monkeypatch.setattr(tus_store, "tus_dir", lambda: tmp_path)
+    parts = []
+    for i, payload in enumerate((b"ab", b"cd")):
+        part = tus_store.TusUpload(
+            uid=f"{i:032x}",
+            size=len(payload),
+            offset=len(payload),
+            metadata={},
+            user_id=1,
+            concat="partial",
+        )
+        tus_store.create(part)
+        tus_store.data_path(part.uid).write_bytes(payload)
+        parts.append(part)
+    dest = tus_store.TusUpload(
+        uid="f" * 32,
+        size=4,
+        offset=0,
+        metadata={},
+        user_id=1,
+    )
+    tus_store.write_concat(dest, [p.uid for p in parts])
+    assert tus_store.data_path(dest.uid).read_bytes() == b"abcd"
+    assert tus_store.data_path(parts[0].uid).exists()
+
+
+@pytest.mark.asyncio
+async def test_tus_commit_pops_lock(auth_client, monkeypatch):
+    from app.routers import tus as tus_mod
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    uid = _uid(path)
+    await _patch(auth_client, path, payload, 0)
+    assert uid in tus_mod._locks
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Sunday talk"})
+    assert commit.status_code == 204
+    assert uid not in tus_mod._locks
+
+
+@pytest.mark.asyncio
+async def test_tus_single_part_concat_commit(auth_client, session, monkeypatch):
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+    pending = _capture_processing(monkeypatch)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Concat": "partial",
+            }
+        ),
+    )
+    assert created.status_code == 201
+    part_path = _upload_url(created)
+    patched = await _patch(auth_client, part_path, payload, 0)
+    assert patched.status_code == 204
+
+    final = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Concat": f"final;{created.headers['location']}",
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    assert final.status_code == 201
+    path = _upload_url(final)
+    assert final.headers.get("upload-offset") == "8"
+    assert load(_uid(part_path)) is None
+    commit = await auth_client.post(f"{path}/commit", json={"title": "One part"})
+    assert commit.status_code == 204
+    media_id, temp_path = pending[0]
+    await process_media(session, media_id, temp_path)
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one()
+    assert item.file_size == 8
+
+
+@pytest.mark.asyncio
+async def test_process_media_reuses_commit_probe(auth_client, session, monkeypatch):
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.routers.tus.rate_limit", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def counting(_path):
+        calls["n"] += 1
+        return AUDIO_PROBE
+
+    monkeypatch.setattr(media_svc, "probe_media", counting)
+    captured: list[object] = []
+
+    def capture(media_id: int, temp_path: str, probe=None) -> None:
+        captured.append((media_id, temp_path, probe))
+
+    monkeypatch.setattr("app.routers.upload.schedule_processing", capture)
+    monkeypatch.setattr("app.routers.tus.schedule_processing", capture)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    await _patch(auth_client, path, payload, 0)
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Reuse probe"})
+    assert commit.status_code == 204
+    media_id, temp_path, probe = captured[0]
+    assert probe == AUDIO_PROBE
+    await process_media(session, media_id, temp_path, probe)
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_watchdog_fails_stale_processing_without_file(auth_client, session):
+    from datetime import datetime, timedelta
+
+    from app.services.auth import get_user_by_email
+    from app.services.media import STALE_PROCESSING_MINUTES, recover_stale_processing
+
+    user = await get_user_by_email(session, "user@test.com")
+    item = MediaItem(
+        title="Stuck",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/stuck.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.processing,
+        updated_at=datetime.utcnow() - timedelta(minutes=STALE_PROCESSING_MINUTES + 5),
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    retry = await recover_stale_processing(session)
+    assert retry == []
+    await session.refresh(item)
+    assert item.status == MediaStatus.failed
+    assert item.processing_error is not None
+    assert "interrupted" in item.processing_error.lower()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_requeues_stale_processing_with_file(auth_client, session):
+    from datetime import datetime, timedelta
+
+    from app.services.auth import get_user_by_email
+    from app.services.media import STALE_PROCESSING_MINUTES, recover_stale_processing
+    from app.services.tus_store import TusUpload, create, data_path
+
+    user = await get_user_by_email(session, "user@test.com")
+    item = MediaItem(
+        title="Retry me",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/retry.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.processing,
+        updated_at=datetime.utcnow() - timedelta(minutes=STALE_PROCESSING_MINUTES + 5),
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    upload = TusUpload(
+        uid="c" * 32,
+        size=4,
+        offset=4,
+        metadata={},
+        user_id=user.id,
+        media_id=item.id,
+    )
+    create(upload)
+    data_path(upload.uid).write_bytes(b"data")
+
+    retry = await recover_stale_processing(session)
+    assert retry == [(item.id, str(data_path(upload.uid)))]
+    await session.refresh(item)
+    assert item.status == MediaStatus.processing
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_recent_processing(auth_client, session):
+    from datetime import datetime
+
+    from app.services.auth import get_user_by_email
+    from app.services.media import recover_stale_processing
+
+    user = await get_user_by_email(session, "user@test.com")
+    item = MediaItem(
+        title="Fresh",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/fresh.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.processing,
+        updated_at=datetime.utcnow(),
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    retry = await recover_stale_processing(session)
+    assert retry == []
+    await session.refresh(item)
+    assert item.status == MediaStatus.processing
+
+
+@pytest.mark.asyncio
+async def test_cleanup_leaves_in_flight_and_retryable(auth_client, session, monkeypatch):
+    import os
+    import time
+    from datetime import datetime
+
+    from app.services.auth import get_user_by_email
+    from app.services.media import (
+        RETRYABLE_UPLOAD_PREFIX,
+        TUS_TTL_SECONDS,
+        cleanup_abandoned_temps,
+        mark_temp_in_flight,
+        unmark_temp_in_flight,
+    )
+    from app.services.tus_store import TusUpload, create, data_path, load, tus_dir
+
+    user = await get_user_by_email(session, "user@test.com")
+    stale = TusUpload(
+        uid="d" * 32,
+        size=1,
+        offset=1,
+        metadata={},
+        user_id=user.id,
+    )
+    create(stale)
+    data_path(stale.uid).write_bytes(b"x")
+    old = time.time() - TUS_TTL_SECONDS - 10
+    os.utime(data_path(stale.uid), (old, old))
+    os.utime(tus_dir() / f"{stale.uid}.info", (old, old))
+
+    live = TusUpload(
+        uid="e" * 32,
+        size=1,
+        offset=1,
+        metadata={},
+        user_id=user.id,
+    )
+    create(live)
+    data_path(live.uid).write_bytes(b"y")
+    os.utime(data_path(live.uid), (old, old))
+    os.utime(tus_dir() / f"{live.uid}.info", (old, old))
+    mark_temp_in_flight(str(data_path(live.uid)))
+
+    item = MediaItem(
+        title="Keep",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/keep.mp3",
+        mime_type="audio/mpeg",
+        file_size=1,
+        uploaded_by_id=user.id,
+        status=MediaStatus.failed,
+        processing_error=RETRYABLE_UPLOAD_PREFIX + " B2 down",
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+    retryable = TusUpload(
+        uid="f" * 32,
+        size=1,
+        offset=1,
+        metadata={},
+        user_id=user.id,
+        media_id=item.id,
+    )
+    create(retryable)
+    data_path(retryable.uid).write_bytes(b"z")
+    os.utime(data_path(retryable.uid), (old, old))
+    os.utime(tus_dir() / f"{retryable.uid}.info", (old, old))
+
+    try:
+        await cleanup_abandoned_temps(session)
+        assert load(stale.uid) is None
+        assert load(live.uid) is not None
+        assert load(retryable.uid) is not None
+    finally:
+        unmark_temp_in_flight(str(data_path(live.uid)))

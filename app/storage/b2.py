@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,20 +12,43 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config import get_settings
+from app.storage.base import ObjectNotFoundError, StorageUnavailableError
 
 logger = logging.getLogger(__name__)
 
 _MULTIPART_THRESHOLD = 8 * 1024 * 1024
-_MULTIPART_CHUNKSIZE = 16 * 1024 * 1024
+_MULTIPART_CHUNKSIZE = 8 * 1024 * 1024
+_MULTIPART_WORKERS = 4
+_STREAM_CHUNK = 1024 * 1024
+_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webm": "video/webm",
+    ".ogg": "audio/ogg",
+    ".mov": "video/quicktime",
+    ".wav": "audio/wav",
+}
 _UPLOAD_ERRORS = (BotoCoreError, ClientError, S3UploadFailedError)
+_NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
+
+
+def content_type_for_key(key: str) -> str:
+    return _CONTENT_TYPES.get(Path(key).suffix.lower(), "application/octet-stream")
 
 
 def region_from_endpoint(endpoint: str) -> str:
     host = urlparse(endpoint).hostname or ""
     parts = host.split(".")
-    if len(parts) >= 2 and parts[0] == "s3":
+    if len(parts) >= 2 and parts[0] == "s3" and parts[1]:
         return parts[1]
-    return "us-west-004"
+    raise ValueError(
+        "Cannot parse B2 region from B2_ENDPOINT="
+        f"{endpoint!r}. Use the S3 endpoint from the B2 bucket page, "
+        "e.g. https://s3.us-west-004.backblazeb2.com"
+    )
 
 
 def _boto_config() -> Config:
@@ -75,6 +99,27 @@ def _friendly_b2_error(exc: BaseException) -> RuntimeError:
     return RuntimeError(f"Backblaze upload failed ({code or 'error'}): {message}")
 
 
+def _is_not_found(exc: BaseException) -> bool:
+    client_exc = _client_error(exc)
+    if client_exc is None:
+        return False
+    response = client_exc.response or {}
+    error = response.get("Error") or {}
+    code = str(error.get("Code") or "")
+    if code == "NoSuchBucket":
+        return False
+    if code in _NOT_FOUND_CODES:
+        return True
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return status == 404
+
+
+def _storage_error(exc: BaseException, key: str = "") -> Exception:
+    if _is_not_found(exc):
+        return ObjectNotFoundError(key)
+    return StorageUnavailableError(str(_friendly_b2_error(exc)))
+
+
 class B2Storage:
     def __init__(self) -> None:
         settings = get_settings()
@@ -93,32 +138,76 @@ class B2Storage:
         return await asyncio.to_thread(partial(fn, *args, **kwargs))
 
     def _put_object(self, key: str, data: bytes) -> None:
-        self._client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        self._client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type_for_key(key),
+        )
+
+    def _upload_part_slice(
+        self,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        src_path: str,
+        offset: int,
+        size: int,
+    ) -> dict:
+        with open(src_path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read(size)
+        resp = self._client.upload_part(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=part_number,
+            Body=data,
+            ContentLength=len(data),
+        )
+        return {"ETag": resp["ETag"], "PartNumber": part_number}
 
     def _upload_multipart(self, key: str, src_path: str) -> None:
         upload_id: str | None = None
         try:
             created = self._client.create_multipart_upload(
-                Bucket=self.bucket, Key=key
+                Bucket=self.bucket,
+                Key=key,
+                ContentType=content_type_for_key(key),
             )
             upload_id = created["UploadId"]
-            parts: list[dict] = []
+            file_size = Path(src_path).stat().st_size
+            slices: list[tuple[int, int, int]] = []
+            offset = 0
             part_number = 1
-            with open(src_path, "rb") as handle:
-                while True:
-                    data = handle.read(_MULTIPART_CHUNKSIZE)
-                    if not data:
-                        break
-                    resp = self._client.upload_part(
-                        Bucket=self.bucket,
-                        Key=key,
-                        UploadId=upload_id,
-                        PartNumber=part_number,
-                        Body=data,
-                        ContentLength=len(data),
-                    )
-                    parts.append({"ETag": resp["ETag"], "PartNumber": part_number})
-                    part_number += 1
+            while offset < file_size:
+                length = min(_MULTIPART_CHUNKSIZE, file_size - offset)
+                slices.append((part_number, offset, length))
+                offset += length
+                part_number += 1
+            workers = max(1, min(_MULTIPART_WORKERS, len(slices)))
+            parts_by_number: dict[int, dict] = {}
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        self._upload_part_slice,
+                        key,
+                        upload_id,
+                        number,
+                        src_path,
+                        start,
+                        length,
+                    ): number
+                    for number, start, length in slices
+                }
+                try:
+                    for fut in as_completed(futures):
+                        parts_by_number[futures[fut]] = fut.result()
+                except Exception:
+                    for fut in futures:
+                        fut.cancel()
+                    raise
+            parts = [parts_by_number[n] for n in sorted(parts_by_number)]
             self._client.complete_multipart_upload(
                 Bucket=self.bucket,
                 Key=key,
@@ -157,10 +246,7 @@ class B2Storage:
         logger.info("Uploaded %s to B2 bucket %s", key, self.bucket)
 
     async def open_stream(self, key: str) -> AsyncIterator[bytes]:
-        size = await self.get_size(key)
-        if size == 0:
-            return
-        async for chunk in self.read_range(key, 0, size - 1):
+        async for chunk in self.read_range(key, 0, None):
             yield chunk
 
     async def read_range(self, key: str, start: int, end: int | None) -> AsyncIterator[bytes]:
@@ -172,32 +258,57 @@ class B2Storage:
         def _get():
             return self._client.get_object(**kwargs)
 
-        response = await self._run(_get)
-        body = response["Body"]
+        try:
+            response = await self._run(_get)
+        except _UPLOAD_ERRORS as exc:
+            raise _storage_error(exc, key) from exc
 
-        def _read_chunks():
+        body = response["Body"]
+        try:
             while True:
-                chunk = body.read(1024 * 1024)
+                chunk = await self._run(body.read, _STREAM_CHUNK)
                 if not chunk:
                     break
                 yield chunk
-
-        for chunk in await self._run(lambda: list(_read_chunks())):
-            yield chunk
+        finally:
+            close = getattr(body, "close", None)
+            if close is not None:
+                try:
+                    await self._run(close)
+                except Exception:
+                    logger.exception("Failed to close B2 stream for %s", key)
 
     async def get_size(self, key: str) -> int:
         def _head():
             return self._client.head_object(Bucket=self.bucket, Key=key)
 
-        resp = await self._run(_head)
+        try:
+            resp = await self._run(_head)
+        except _UPLOAD_ERRORS as exc:
+            raise _storage_error(exc, key) from exc
         return resp["ContentLength"]
 
     async def exists(self, key: str) -> bool:
         try:
             await self.get_size(key)
             return True
-        except Exception:
+        except ObjectNotFoundError:
             return False
+
+    async def check(self) -> None:
+        def _head():
+            self._client.head_bucket(Bucket=self.bucket)
+
+        try:
+            await self._run(_head)
+        except _UPLOAD_ERRORS as exc:
+            message = str(_friendly_b2_error(exc))
+            logger.error(
+                "B2 head_bucket failed for bucket %s endpoint check: %s",
+                self.bucket,
+                message,
+            )
+            raise StorageUnavailableError(message) from exc
 
     async def delete(self, key: str) -> None:
         await self._run(self._client.delete_object, Bucket=self.bucket, Key=key)

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
                 ("B2_KEY_ID", self.b2_key_id),
                 ("B2_APP_KEY", self.b2_app_key),
                 ("B2_BUCKET", self.b2_bucket),
+                ("B2_ENDPOINT", self.b2_endpoint),
             )
             if not str(value).strip()
         ]

@@ -487,6 +487,7 @@ async def tus_commit(
             return _tus_error("Partial uploads cannot be committed", status.HTTP_409_CONFLICT)
 
         if upload.media_id is not None:
+            _locks.pop(uid, None)
             return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
         if upload.offset != upload.size:
@@ -502,7 +503,7 @@ async def tus_commit(
         filename = Path(upload.metadata.get("filename") or upload.metadata.get("name") or "upload.bin").name
         mime_type = upload.metadata.get("filetype") or "application/octet-stream"
 
-        item, error, code = await create_item_from_temp_file(
+        item, error, code, probe = await create_item_from_temp_file(
             temp_path=str(path),
             filename=filename,
             mime_type=mime_type,
@@ -520,7 +521,8 @@ async def tus_commit(
         upload.metadata["description"] = description
         upload.metadata["published_at"] = published_at
         save(upload)
-        schedule_processing(item.id, str(path))
+        schedule_processing(item.id, str(path), probe)
+        _locks.pop(uid, None)
         return _tus_response(status.HTTP_204_NO_CONTENT, _offset_headers(upload))
 
 

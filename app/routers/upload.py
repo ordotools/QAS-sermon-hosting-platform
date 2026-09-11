@@ -14,8 +14,15 @@ from app.config import get_settings
 from app.database import async_session, get_session
 from app.deps import require_user, template_context
 from app.models import MediaItem, User
-from app.services.media import create_media_record, new_storage_key, process_media
+from app.services.media import (
+    create_media_record,
+    mark_temp_in_flight,
+    new_storage_key,
+    process_media,
+    unmark_temp_in_flight,
+)
 from app.services.media_formats import (
+    MediaProbe,
     ffprobe_available,
     media_tools_error,
     probe_media,
@@ -32,11 +39,15 @@ router = APIRouter(tags=["upload"])
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
-async def run_processing(media_id: int, temp_path: str) -> None:
+async def run_processing(
+    media_id: int, temp_path: str, probe: MediaProbe | None = None
+) -> None:
+    mark_temp_in_flight(temp_path)
     try:
         async with async_session() as session:
-            await process_media(session, media_id, temp_path)
+            await process_media(session, media_id, temp_path, probe)
     finally:
+        unmark_temp_in_flight(temp_path)
         Path(str(temp_path) + ".info").unlink(missing_ok=True)
 
 
@@ -48,9 +59,11 @@ def _log_processing_task(task: asyncio.Task) -> None:
         logger.exception("Media processing task failed", exc_info=exc)
 
 
-def schedule_processing(media_id: int, temp_path: str) -> None:
+def schedule_processing(
+    media_id: int, temp_path: str, probe: MediaProbe | None = None
+) -> None:
     task = asyncio.create_task(
-        run_processing(media_id, temp_path),
+        run_processing(media_id, temp_path, probe),
         name=f"process-media-{media_id}",
     )
     task.add_done_callback(_log_processing_task)
@@ -66,29 +79,29 @@ async def create_item_from_temp_file(
     published_at: str,
     user: User,
     session: AsyncSession,
-) -> tuple[MediaItem | None, str | None, int]:
+) -> tuple[MediaItem | None, str | None, int, MediaProbe | None]:
     title = title.strip()
     if not title:
-        return None, "Title is required", status.HTTP_400_BAD_REQUEST
+        return None, "Title is required", status.HTTP_400_BAD_REQUEST, None
 
     ext_error = validate_extension(filename)
     if ext_error:
-        return None, ext_error, status.HTTP_400_BAD_REQUEST
+        return None, ext_error, status.HTTP_400_BAD_REQUEST, None
 
     pub_dt = datetime.utcnow()
     if published_at:
         try:
             pub_dt = datetime.fromisoformat(published_at)
         except ValueError:
-            return None, "Invalid published date format", status.HTTP_400_BAD_REQUEST
+            return None, "Invalid published date format", status.HTTP_400_BAD_REQUEST, None
 
     if not ffprobe_available():
-        return None, media_tools_error(), status.HTTP_503_SERVICE_UNAVAILABLE
+        return None, media_tools_error(), status.HTTP_503_SERVICE_UNAVAILABLE, None
 
     probe = await asyncio.to_thread(probe_media, temp_path)
     validation_error = validate_probe(probe)
     if validation_error:
-        return None, validation_error, status.HTTP_400_BAD_REQUEST
+        return None, validation_error, status.HTTP_400_BAD_REQUEST, None
 
     item = await create_media_record(
         session,
@@ -100,7 +113,7 @@ async def create_item_from_temp_file(
         uploaded_by_id=user.id,
         storage_key=new_storage_key(filename),
     )
-    return item, None, status.HTTP_200_OK
+    return item, None, status.HTTP_200_OK, probe
 
 
 async def _recent_uploads(session: AsyncSession, user_id: int) -> list[MediaItem]:
@@ -233,7 +246,7 @@ async def upload_media(
 
     assert temp_path is not None
     try:
-        item, finalize_error, finalize_code = await create_item_from_temp_file(
+        item, finalize_error, finalize_code, probe = await create_item_from_temp_file(
             temp_path=temp_path,
             filename=filename,
             mime_type=file.content_type or "application/octet-stream",
@@ -250,7 +263,7 @@ async def upload_media(
         Path(temp_path).unlink(missing_ok=True)
         raise
 
-    schedule_processing(item.id, temp_path)
+    schedule_processing(item.id, temp_path, probe)
 
     if _wants_json(request):
         return JSONResponse({"ok": True, "media_id": item.id})

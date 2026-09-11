@@ -2,9 +2,10 @@ import asyncio
 import logging
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,8 @@ from sqlmodel import select
 from app.config import get_settings
 from app.models import MediaItem, MediaStatus, MediaType
 from app.services.media_formats import (
+    THUMBNAIL_TIMEOUT_SECONDS,
+    MediaProbe,
     _resolve_binary,
     can_remux_video_to_mp4,
     needs_transcode,
@@ -29,6 +32,13 @@ from app.storage import get_storage
 
 AUDIO_MIMES = {"audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/wav", "audio/ogg", "audio/webm"}
 VIDEO_MIMES = {"video/mp4", "video/webm", "video/ogg", "video/quicktime"}
+_SAVE_ATTEMPTS = 3
+_SAVE_BACKOFF_SECONDS = 0.5
+STALE_PROCESSING_MINUTES = 45
+RETRYABLE_UPLOAD_PREFIX = "Retryable upload failure:"
+TUS_TTL_SECONDS = 24 * 3600
+SCRATCH_TTL_SECONDS = 2 * 3600
+_in_flight_paths: set[str] = set()
 
 
 def detect_media_type(mime_type: str) -> MediaType:
@@ -87,12 +97,13 @@ def _generate_thumbnail(src_path: str, media_type: MediaType, duration: float | 
             ],
             capture_output=True,
             check=False,
+            timeout=THUMBNAIL_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             Path(thumb_path).unlink(missing_ok=True)
             return None
         return thumb_path
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         Path(thumb_path).unlink(missing_ok=True)
         return None
 
@@ -155,11 +166,13 @@ def _prepare_output(
     storage_key: str,
     media_type: MediaType,
     media_id: int,
+    probe: MediaProbe | None = None,
 ) -> _PrepareResult:
     transcode_path: str | None = None
     thumb_path: str | None = None
     try:
-        probe = probe_media(temp_path)
+        if probe is None or not probe.probe_ok:
+            probe = probe_media(temp_path)
         validation_error = validate_probe(probe)
         if validation_error:
             logger.error(
@@ -185,9 +198,11 @@ def _prepare_output(
                 transcode_audio(temp_path, transcode_path)
             final_path = transcode_path
             out_key, out_mime = normalize_storage_key(storage_key, probe.media_type)
+            final_probe = probe_media(final_path)
+            duration = final_probe.duration if final_probe.probe_ok else probe.duration
+        else:
+            duration = probe.duration
 
-        final_probe = probe_media(final_path)
-        duration = final_probe.duration if final_probe.probe_ok else probe.duration
         thumb_path = _generate_thumbnail(final_path, media_type, duration)
         return _PrepareResult(
             final_path=final_path,
@@ -206,7 +221,33 @@ def _prepare_output(
         raise
 
 
-async def process_media(session: AsyncSession, media_id: int, temp_path: str) -> None:
+async def _save_file_with_retry(storage, key: str, src_path: str) -> None:
+    last: BaseException | None = None
+    for attempt in range(1, _SAVE_ATTEMPTS + 1):
+        try:
+            await storage.save_file(key, src_path)
+            return
+        except Exception as exc:
+            last = exc
+            logger.warning(
+                "save_file failed for %s (attempt %s/%s): %s",
+                key,
+                attempt,
+                _SAVE_ATTEMPTS,
+                exc,
+            )
+            if attempt < _SAVE_ATTEMPTS:
+                await asyncio.sleep(_SAVE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+    assert last is not None
+    raise last
+
+
+async def process_media(
+    session: AsyncSession,
+    media_id: int,
+    temp_path: str,
+    probe: MediaProbe | None = None,
+) -> None:
     storage = get_storage()
     result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
     item = result.scalar_one_or_none()
@@ -219,9 +260,11 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
     await session.rollback()
 
     prepared: _PrepareResult | None = None
+    saved_media = False
+    keep_scratch = False
     try:
         prepared = await asyncio.to_thread(
-            _prepare_output, temp_path, storage_key, media_type, media_id
+            _prepare_output, temp_path, storage_key, media_type, media_id, probe
         )
         result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
         item = result.scalar_one_or_none()
@@ -241,13 +284,20 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
         if prepared.mime_type:
             item.mime_type = prepared.mime_type
 
-        await storage.save_file(item.storage_key, prepared.final_path)
+        await _save_file_with_retry(storage, item.storage_key, prepared.final_path)
+        saved_media = True
         item.file_size = Path(prepared.final_path).stat().st_size
 
         if prepared.thumb_path:
             thumb_key = f"thumbnails/{item.id}.jpg"
-            await storage.save_file(thumb_key, prepared.thumb_path)
-            item.thumbnail_key = thumb_key
+            try:
+                await _save_file_with_retry(storage, thumb_key, prepared.thumb_path)
+                item.thumbnail_key = thumb_key
+            except Exception:
+                logger.exception(
+                    "Thumbnail upload failed for item %s; publishing without thumbnail",
+                    media_id,
+                )
 
         item.duration_seconds = prepared.duration
         item.status = MediaStatus.ready
@@ -259,15 +309,22 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
         item = result.scalar_one_or_none()
         if item:
             item.status = MediaStatus.failed
-            item.processing_error = _processing_error_message(exc)
+            if prepared is not None and not prepared.error and not saved_media:
+                keep_scratch = True
+                item.processing_error = (
+                    RETRYABLE_UPLOAD_PREFIX + " " + _processing_error_message(exc)
+                )[:500]
+            else:
+                item.processing_error = _processing_error_message(exc)
             item.updated_at = datetime.utcnow()
     finally:
-        Path(temp_path).unlink(missing_ok=True)
-        if prepared:
-            if prepared.transcode_path:
-                Path(prepared.transcode_path).unlink(missing_ok=True)
-            if prepared.thumb_path:
-                Path(prepared.thumb_path).unlink(missing_ok=True)
+        if not keep_scratch:
+            Path(temp_path).unlink(missing_ok=True)
+            if prepared:
+                if prepared.transcode_path:
+                    Path(prepared.transcode_path).unlink(missing_ok=True)
+                if prepared.thumb_path:
+                    Path(prepared.thumb_path).unlink(missing_ok=True)
         if item:
             session.add(item)
             await session.commit()
@@ -285,3 +342,109 @@ async def delete_media(session: AsyncSession, item: MediaItem) -> None:
 def new_storage_key(filename: str) -> str:
     ext = Path(filename).suffix.lower() or ".bin"
     return f"media/{uuid.uuid4().hex}{ext}"
+
+
+def _resolved(path: str | Path) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def mark_temp_in_flight(path: str) -> None:
+    _in_flight_paths.add(_resolved(path))
+
+
+def unmark_temp_in_flight(path: str) -> None:
+    _in_flight_paths.discard(_resolved(path))
+
+
+def _keep_temp_for_item(item: MediaItem) -> bool:
+    if item.status == MediaStatus.processing:
+        return True
+    if item.status == MediaStatus.failed and (item.processing_error or "").startswith(
+        RETRYABLE_UPLOAD_PREFIX
+    ):
+        return True
+    return False
+
+
+def _cleanup_temp_files(keep_media_ids: set[int]) -> None:
+    from app.services.tus_store import data_path, delete, load, tus_dir
+
+    now = time.time()
+    known_uids: set[str] = set()
+    for info in tus_dir().glob("*.info"):
+        uid = info.stem
+        known_uids.add(uid)
+        upload = load(uid)
+        data = data_path(uid)
+        mtimes = [info.stat().st_mtime]
+        if data.is_file():
+            mtimes.append(data.stat().st_mtime)
+        age = now - max(mtimes)
+        keep = False
+        if upload and upload.media_id in keep_media_ids:
+            keep = True
+        elif _resolved(data) in _in_flight_paths:
+            keep = True
+        elif age < TUS_TTL_SECONDS:
+            keep = True
+        if not keep:
+            delete(uid)
+
+    for data in tus_dir().iterdir():
+        if not data.is_file() or data.suffix == ".info" or data.name in known_uids:
+            continue
+        if _resolved(data) in _in_flight_paths:
+            continue
+        if now - data.stat().st_mtime >= TUS_TTL_SECONDS:
+            data.unlink(missing_ok=True)
+
+    scratch = scratch_dir()
+    for path in scratch.iterdir():
+        if not path.is_file():
+            continue
+        if _resolved(path) in _in_flight_paths:
+            continue
+        if now - path.stat().st_mtime >= SCRATCH_TTL_SECONDS:
+            path.unlink(missing_ok=True)
+
+
+async def recover_stale_processing(
+    session: AsyncSession,
+    *,
+    older_than_minutes: int = STALE_PROCESSING_MINUTES,
+) -> list[tuple[int, str]]:
+    from app.services.tus_store import find_path_for_media
+
+    cutoff = datetime.utcnow() - timedelta(minutes=older_than_minutes)
+    result = await session.execute(
+        select(MediaItem).where(MediaItem.status == MediaStatus.processing)
+    )
+    retry: list[tuple[int, str]] = []
+    changed = False
+    for item in result.scalars().all():
+        if older_than_minutes > 0 and item.updated_at > cutoff:
+            continue
+        path = find_path_for_media(item.id) if item.id is not None else None
+        if path is not None:
+            retry.append((item.id, str(path)))
+            continue
+        item.status = MediaStatus.failed
+        item.processing_error = (
+            "Processing interrupted: the worker stopped before finishing. "
+            "Please upload again."
+        )[:500]
+        item.updated_at = datetime.utcnow()
+        session.add(item)
+        changed = True
+    if changed:
+        await session.commit()
+    return retry
+
+
+async def cleanup_abandoned_temps(session: AsyncSession) -> None:
+    result = await session.execute(select(MediaItem))
+    keep_ids = {item.id for item in result.scalars().all() if item.id and _keep_temp_for_item(item)}
+    await asyncio.to_thread(_cleanup_temp_files, keep_ids)
