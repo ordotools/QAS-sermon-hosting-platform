@@ -49,6 +49,14 @@ class Settings(BaseSettings):
             raise ValueError("STORAGE_BACKEND must be local or b2")
         return normalized
 
+    @field_validator("b2_key_id", "b2_app_key", "b2_bucket", "b2_endpoint", mode="before")
+    @classmethod
+    def _strip_b2_values(cls, value: str) -> str:
+        text = str(value).strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+            text = text[1:-1].strip()
+        return text
+
     @field_validator("session_cookie_samesite", mode="before")
     @classmethod
     def _normalize_samesite(cls, value: str) -> str:

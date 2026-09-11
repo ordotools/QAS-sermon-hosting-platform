@@ -50,6 +50,20 @@ def test_b2_storage_accepts_complete_credentials():
     assert settings.storage_backend == "b2"
 
 
+def test_b2_credentials_strip_quotes_and_whitespace():
+    settings = _settings(
+        storage_backend="b2",
+        b2_key_id=' "0052id" ',
+        b2_app_key=" 'secret' ",
+        b2_bucket=" bucket ",
+        b2_endpoint=" https://s3.eu-central-003.backblazeb2.com ",
+    )
+    assert settings.b2_key_id == "0052id"
+    assert settings.b2_app_key == "secret"
+    assert settings.b2_bucket == "bucket"
+    assert settings.b2_endpoint == "https://s3.eu-central-003.backblazeb2.com"
+
+
 def test_storage_backend_normalizes_case():
     settings = _settings(
         storage_backend="B2",

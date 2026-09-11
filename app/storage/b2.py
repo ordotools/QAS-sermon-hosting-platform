@@ -2,13 +2,29 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from functools import partial
+from urllib.parse import urlparse
 
 import boto3
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# B2 allows a single PutObject up to 5 GiB. Stay under that so boto3 does
+# not call CreateMultipartUpload (needs a matching S3 region).
+_SINGLE_PUT_MAX = 4 * 1024 * 1024 * 1024
+
+
+def region_from_endpoint(endpoint: str) -> str:
+    host = urlparse(endpoint).hostname or ""
+    parts = host.split(".")
+    if len(parts) >= 2 and parts[0] == "s3":
+        return parts[1]
+    return "us-west-004"
 
 
 def _boto_config() -> Config:
@@ -27,13 +43,49 @@ def _boto_config() -> Config:
         return Config(**kwargs)
 
 
+def _transfer_config() -> TransferConfig:
+    return TransferConfig(
+        multipart_threshold=_SINGLE_PUT_MAX,
+        multipart_chunksize=64 * 1024 * 1024,
+    )
+
+
+def _client_error(exc: BaseException) -> ClientError | None:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ClientError):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _friendly_b2_error(exc: BaseException) -> RuntimeError:
+    client_exc = _client_error(exc)
+    if client_exc is None:
+        return RuntimeError(str(exc))
+    error = (client_exc.response or {}).get("Error") or {}
+    code = str(error.get("Code") or "")
+    message = str(error.get("Message") or client_exc)
+    if code == "InvalidAccessKeyId":
+        return RuntimeError(
+            "Backblaze rejected B2_KEY_ID. Use the application keyID (not the "
+            "account ID), and set B2_ENDPOINT to this bucket's S3 endpoint "
+            "from the B2 bucket page (region must match the key)."
+        )
+    return RuntimeError(f"Backblaze upload failed ({code or 'error'}): {message}")
+
+
 class B2Storage:
     def __init__(self) -> None:
         settings = get_settings()
         self.bucket = settings.b2_bucket
+        endpoint = settings.b2_endpoint
         self._client = boto3.client(
             "s3",
-            endpoint_url=settings.b2_endpoint,
+            endpoint_url=endpoint,
+            region_name=region_from_endpoint(endpoint),
             aws_access_key_id=settings.b2_key_id,
             aws_secret_access_key=settings.b2_app_key,
             config=_boto_config(),
@@ -43,21 +95,32 @@ class B2Storage:
         return await asyncio.to_thread(partial(fn, *args, **kwargs))
 
     async def save(self, key: str, data: bytes) -> None:
-        await self._run(
-            self._client.put_object,
-            Bucket=self.bucket,
-            Key=key,
-            Body=data,
-        )
+        try:
+            await self._run(
+                self._client.put_object,
+                Bucket=self.bucket,
+                Key=key,
+                Body=data,
+            )
+        except (ClientError, S3UploadFailedError) as exc:
+            raise _friendly_b2_error(exc) from exc
 
     async def save_file(self, key: str, src_path: str) -> None:
         logger.info("Uploading %s to B2 bucket %s", key, self.bucket)
 
         def _upload():
             with open(src_path, "rb") as f:
-                self._client.upload_fileobj(f, self.bucket, key)
+                self._client.upload_fileobj(
+                    f,
+                    self.bucket,
+                    key,
+                    Config=_transfer_config(),
+                )
 
-        await self._run(_upload)
+        try:
+            await self._run(_upload)
+        except (ClientError, S3UploadFailedError) as exc:
+            raise _friendly_b2_error(_client_error(exc) or exc) from exc
         logger.info("Uploaded %s to B2 bucket %s", key, self.bucket)
 
     async def open_stream(self, key: str) -> AsyncIterator[bytes]:

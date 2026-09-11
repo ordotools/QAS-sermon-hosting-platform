@@ -94,6 +94,8 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
    MAX_UPLOAD_SIZE_MB=1500
    ```
 
+   Copy **B2_ENDPOINT** from the B2 bucket page (S3 endpoint). It must match the key's region. `us-west-004` is only correct if that is your bucket's endpoint. A mismatch returns `InvalidAccessKeyId` / "The key '…' is not valid". `B2_KEY_ID` is the **application keyID**, not the account ID.
+
    Do not set `STORAGE_BACKEND=local` in Coolify. Compose pins `STORAGE_BACKEND=b2`, and the app also forces B2 when Coolify env is present. Confirm with `GET /health` (`"storage":"b2"`) or Admin → Storage. Objects land under `media/` and `thumbnails/`, not the bucket root. Failed (`processing` never reached `ready`) files never leave the scratch volume. Files already on the volume stay there until re-uploaded.
 
 7. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
@@ -135,7 +137,7 @@ B2_BUCKET=your-bucket-name
 B2_ENDPOINT=https://s3.us-west-004.backblazeb2.com
 ```
 
-Use the S3-compatible endpoint for your bucket region. Streams always go through `/stream/{id}` — never expose presigned B2 URLs.
+Use the S3-compatible endpoint for your bucket region (shown on the B2 bucket page). Default `s3.us-west-004.backblazeb2.com` is wrong if the bucket lives elsewhere. Streams always go through `/stream/{id}` — never expose presigned B2 URLs.
 
 ## Production notes
 
