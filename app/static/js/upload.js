@@ -11,6 +11,7 @@
   const progressWrap = document.getElementById('upload-progress');
   const progressBar = document.getElementById('upload-progress-bar');
   const progressText = document.getElementById('upload-progress-text');
+  const etaEl = document.getElementById('upload-eta');
   const cancelBtn = document.getElementById('upload-cancel');
   const messageEl = document.getElementById('upload-message');
   const errorEl = document.getElementById('upload-error');
@@ -23,6 +24,8 @@
   const STALL_MS = 30000;
   const STALL_CHECK_MS = 5000;
   const STALL_RESUME_MAX = 2;
+  const ETA_WINDOW_MS = 8000;
+  const ETA_MIN_SPAN_MS = 1000;
 
   let activeUpload = null;
   let activeFile = null;
@@ -32,6 +35,7 @@
   let lastProgressAt = 0;
   let lastLoaded = 0;
   let lastTotal = 0;
+  let progressSamples = [];
   let cancelled = false;
   let bytesComplete = false;
   let pendingCommit = false;
@@ -98,12 +102,61 @@
     dropZone?.classList.toggle('is-disabled', active);
   }
 
+  function hideEta() {
+    progressSamples = [];
+    if (!etaEl) return;
+    etaEl.textContent = '';
+    hide(etaEl);
+  }
+
+  function formatEta(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '';
+    const s = Math.max(1, Math.round(seconds));
+    if (s < 60) return `About ${s} sec left`;
+    const min = Math.round(s / 60);
+    if (min < 90) return `About ${min} min left`;
+    const hr = Math.max(1, Math.round(min / 60));
+    return `About ${hr} hr left`;
+  }
+
+  function updateEta(loaded, total) {
+    if (!etaEl || !pendingCommit || commitInFlight || !total || loaded >= total) {
+      hideEta();
+      return;
+    }
+    const now = Date.now();
+    progressSamples.push({ t: now, loaded });
+    const cutoff = now - ETA_WINDOW_MS;
+    progressSamples = progressSamples.filter((sample) => sample.t >= cutoff);
+    if (progressSamples.length < 2) {
+      hide(etaEl);
+      return;
+    }
+    const first = progressSamples[0];
+    const last = progressSamples[progressSamples.length - 1];
+    const dt = last.t - first.t;
+    const db = last.loaded - first.loaded;
+    if (dt < ETA_MIN_SPAN_MS || db <= 0) {
+      hide(etaEl);
+      return;
+    }
+    const remainingSec = (total - loaded) / (db / dt) / 1000;
+    const text = formatEta(remainingSec);
+    if (!text) {
+      hide(etaEl);
+      return;
+    }
+    etaEl.textContent = text;
+    show(etaEl);
+  }
+
   function resetProgress() {
     if (progressBar) {
       progressBar.value = 0;
       progressBar.removeAttribute('value');
     }
     if (progressText) progressText.textContent = '0%';
+    hideEta();
     hide(progressWrap);
   }
 
@@ -116,9 +169,12 @@
     progressBar.setAttribute('aria-valuenow', String(pct));
     progressText.textContent = `${pct}%`;
     if (pct >= 100) {
+      hideEta();
       stopStallWatch();
       setMessage('Finishing upload…');
+      return;
     }
+    updateEta(loaded, total);
   }
 
   function validateFile(file) {
@@ -288,6 +344,7 @@
       handleFailure('Upload stalled. Submit again to resume from the last chunk.');
       return;
     }
+    hideEta();
     setMessage('Upload stalled — resuming…');
     ignoreAbort = true;
     try {
@@ -323,8 +380,8 @@
     ignoreAbort = false;
     activeUpload = null;
     activeFile = null;
-    setMessage('Upload complete — processing…');
-    if (fileInput) fileInput.value = '';
+    setMessage('Upload complete. You can leave this page — processing will finish in the background.');
+    form.reset();
     clearFilenameDisplay();
     refreshUploadStatus();
     setStatusPolling(true);
@@ -374,6 +431,7 @@
     ignoreAbort = false;
     lastLoaded = 0;
     lastTotal = 0;
+    hideEta();
     stopStallWatch();
     setStatusPolling(true);
     if (!upload) return;
@@ -389,6 +447,7 @@
     }
     commitInFlight = true;
     stopStallWatch();
+    hideEta();
     setMessage('Finishing upload…');
     try {
       const res = await fetch(`/files/${uid}/commit`, {

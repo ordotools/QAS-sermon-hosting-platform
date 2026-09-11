@@ -27,6 +27,7 @@
     </label>
   </div>
   <p class="hint upload-hint">iPhone video (.mov) and voice memos (.m4a) are supported; files are converted automatically for web playback. Transfer starts when you choose a file and resumes if the connection drops — keep this page open.</p>
+  <p id="upload-eta" class="upload-eta hidden" aria-live="polite"></p>
   <div id="upload-progress" class="upload-progress hidden" aria-live="polite">
     <progress id="upload-progress-bar" max="100" aria-label="Upload progress">0</progress>
     <span id="upload-progress-text" class="upload-progress-text">0%</span>
@@ -51,5 +52,5 @@
 {% endblock %}
 {% block scripts %}
 <script src="/static/vendor/tus/tus.min.js" defer></script>
-<script src="/static/js/upload.js?v=3" defer></script>
+<script src="/static/js/upload.js?v=4" defer></script>
 {% endblock %}

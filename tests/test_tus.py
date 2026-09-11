@@ -302,6 +302,42 @@ async def test_tus_commit_returns_before_processing(auth_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upload_status_responsive_during_processing(auth_client, monkeypatch):
+    import time
+
+    from app.services import media as media_svc
+
+    monkeypatch.setattr("app.routers.upload.probe_media", lambda _path: AUDIO_PROBE)
+    monkeypatch.setattr("app.services.media.probe_media", lambda _path: AUDIO_PROBE)
+
+    def slow_prepare(temp_path: str, *_args, **_kwargs):
+        time.sleep(1)
+        return media_svc._PrepareResult(final_path=temp_path, error="slow-test")
+
+    monkeypatch.setattr(media_svc, "_prepare_output", slow_prepare)
+
+    payload = b"abcdefgh"
+    created = await auth_client.post(
+        "/files",
+        headers=_tus_headers(
+            **{
+                "Upload-Length": str(len(payload)),
+                "Upload-Metadata": _meta(filename="talk.mp3", filetype="audio/mpeg"),
+            }
+        ),
+    )
+    path = _upload_url(created)
+    patched = await _patch(auth_client, path, payload, 0)
+    assert patched.status_code == 204
+    commit = await auth_client.post(f"{path}/commit", json={"title": "Sunday talk"})
+    assert commit.status_code == 204
+
+    status = await asyncio.wait_for(auth_client.get("/upload/status"), timeout=0.5)
+    assert status.status_code == 200
+    await asyncio.sleep(1.2)
+
+
+@pytest.mark.asyncio
 async def test_tus_commit_incomplete_conflicts(auth_client):
     created = await auth_client.post(
         "/files",
@@ -658,5 +694,6 @@ async def test_upload_page_includes_tus(auth_client):
     r = await auth_client.get("/upload")
     assert r.status_code == 200
     assert "/static/vendor/tus/tus.min.js" in r.text
-    assert "/static/js/upload.js?v=3" in r.text
+    assert "/static/js/upload.js?v=4" in r.text
+    assert 'id="upload-eta"' in r.text
     assert "Transfer starts when you choose a file" in r.text

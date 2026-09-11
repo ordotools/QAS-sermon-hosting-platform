@@ -242,6 +242,13 @@ body {
   margin-bottom: 1rem;
 }
 
+.upload-eta {
+  margin: 0 0 0.35rem;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  color: #4a5568;
+}
+
 .upload-progress progress {
   flex: 1;
   height: 0.5rem;

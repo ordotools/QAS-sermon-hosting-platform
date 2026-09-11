@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -108,15 +110,26 @@ async def create_media_record(
     return item
 
 
-async def process_media(session: AsyncSession, media_id: int, temp_path: str) -> None:
-    storage = get_storage()
-    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
-    item = result.scalar_one_or_none()
-    if not item:
-        Path(temp_path).unlink(missing_ok=True)
-        return
-
+@dataclass
+class _PrepareResult:
+    final_path: str
     transcode_path: str | None = None
+    thumb_path: str | None = None
+    duration: float | None = None
+    media_type: MediaType | None = None
+    storage_key: str | None = None
+    mime_type: str | None = None
+    error: str | None = None
+
+
+def _prepare_output(
+    temp_path: str,
+    storage_key: str,
+    media_type: MediaType,
+    media_id: int,
+) -> _PrepareResult:
+    transcode_path: str | None = None
+    thumb_path: str | None = None
     try:
         probe = probe_media(temp_path)
         validation_error = validate_probe(probe)
@@ -124,14 +137,14 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
             logger.error(
                 "Media validation failed for item %s: %s", media_id, validation_error
             )
-            item.status = MediaStatus.failed
-            item.updated_at = datetime.utcnow()
-            return
+            return _PrepareResult(final_path=temp_path, error=validation_error)
 
         if probe.media_type:
-            item.media_type = probe.media_type
+            media_type = probe.media_type
 
         final_path = temp_path
+        out_key = storage_key
+        out_mime: str | None = None
         if needs_transcode(probe):
             suffix = ".mp4" if probe.media_type == MediaType.video else ".m4a"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -144,36 +157,90 @@ async def process_media(session: AsyncSession, media_id: int, temp_path: str) ->
             else:
                 transcode_audio(temp_path, transcode_path)
             final_path = transcode_path
-            item.storage_key, item.mime_type = normalize_storage_key(
-                item.storage_key, probe.media_type
-            )
+            out_key, out_mime = normalize_storage_key(storage_key, probe.media_type)
 
         final_probe = probe_media(final_path)
         duration = final_probe.duration if final_probe.probe_ok else probe.duration
+        thumb_path = _generate_thumbnail(final_path, media_type, duration)
+        return _PrepareResult(
+            final_path=final_path,
+            transcode_path=transcode_path,
+            thumb_path=thumb_path,
+            duration=duration,
+            media_type=media_type,
+            storage_key=out_key,
+            mime_type=out_mime,
+        )
+    except Exception:
+        if transcode_path:
+            Path(transcode_path).unlink(missing_ok=True)
+        if thumb_path:
+            Path(thumb_path).unlink(missing_ok=True)
+        raise
 
-        await storage.save_file(item.storage_key, final_path)
-        item.file_size = Path(final_path).stat().st_size
 
-        thumb_local = _generate_thumbnail(final_path, item.media_type, duration)
-        if thumb_local:
+async def process_media(session: AsyncSession, media_id: int, temp_path: str) -> None:
+    storage = get_storage()
+    result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+    item = result.scalar_one_or_none()
+    if not item:
+        Path(temp_path).unlink(missing_ok=True)
+        return
+
+    storage_key = item.storage_key
+    media_type = item.media_type
+    await session.rollback()
+
+    prepared: _PrepareResult | None = None
+    try:
+        prepared = await asyncio.to_thread(
+            _prepare_output, temp_path, storage_key, media_type, media_id
+        )
+        result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+        item = result.scalar_one_or_none()
+        if not item:
+            return
+
+        if prepared.error:
+            item.status = MediaStatus.failed
+            item.updated_at = datetime.utcnow()
+            return
+
+        if prepared.media_type:
+            item.media_type = prepared.media_type
+        if prepared.storage_key:
+            item.storage_key = prepared.storage_key
+        if prepared.mime_type:
+            item.mime_type = prepared.mime_type
+
+        await storage.save_file(item.storage_key, prepared.final_path)
+        item.file_size = Path(prepared.final_path).stat().st_size
+
+        if prepared.thumb_path:
             thumb_key = f"thumbnails/{item.id}.jpg"
-            await storage.save_file(thumb_key, thumb_local)
-            Path(thumb_local).unlink(missing_ok=True)
+            await storage.save_file(thumb_key, prepared.thumb_path)
             item.thumbnail_key = thumb_key
 
-        item.duration_seconds = duration
+        item.duration_seconds = prepared.duration
         item.status = MediaStatus.ready
         item.updated_at = datetime.utcnow()
     except Exception:
         logger.exception("Media processing failed for item %s", media_id)
-        item.status = MediaStatus.failed
-        item.updated_at = datetime.utcnow()
+        result = await session.execute(select(MediaItem).where(MediaItem.id == media_id))
+        item = result.scalar_one_or_none()
+        if item:
+            item.status = MediaStatus.failed
+            item.updated_at = datetime.utcnow()
     finally:
         Path(temp_path).unlink(missing_ok=True)
-        if transcode_path:
-            Path(transcode_path).unlink(missing_ok=True)
-        session.add(item)
-        await session.commit()
+        if prepared:
+            if prepared.transcode_path:
+                Path(prepared.transcode_path).unlink(missing_ok=True)
+            if prepared.thumb_path:
+                Path(prepared.thumb_path).unlink(missing_ok=True)
+        if item:
+            session.add(item)
+            await session.commit()
 
 
 async def delete_media(session: AsyncSession, item: MediaItem) -> None:
