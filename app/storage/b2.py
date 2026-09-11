@@ -2,11 +2,11 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from functools import partial
+from pathlib import Path
 from urllib.parse import urlparse
 
 import boto3
 from boto3.exceptions import S3UploadFailedError
-from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -28,10 +28,14 @@ def region_from_endpoint(endpoint: str) -> str:
 
 
 def _boto_config() -> Config:
-    # boto3 1.36+ sends checksum headers B2 does not accept.
+    # boto3 1.36+ sends checksum headers B2 does not accept. UNSIGNED-PAYLOAD
+    # avoids aws-chunked UploadPart signatures that B2 rejects.
     kwargs: dict = {
         "signature_version": "s3v4",
-        "s3": {"addressing_style": "path"},
+        "s3": {
+            "addressing_style": "path",
+            "payload_signing_enabled": False,
+        },
         "retries": {"max_attempts": 8, "mode": "standard"},
         "request_checksum_calculation": "when_required",
         "response_checksum_validation": "when_required",
@@ -42,14 +46,6 @@ def _boto_config() -> Config:
         kwargs.pop("request_checksum_calculation", None)
         kwargs.pop("response_checksum_validation", None)
         return Config(**kwargs)
-
-
-def _transfer_config() -> TransferConfig:
-    return TransferConfig(
-        multipart_threshold=_MULTIPART_THRESHOLD,
-        multipart_chunksize=_MULTIPART_CHUNKSIZE,
-        max_concurrency=4,
-    )
 
 
 def _client_error(exc: BaseException) -> ClientError | None:
@@ -96,31 +92,66 @@ class B2Storage:
     async def _run(self, fn, *args, **kwargs):
         return await asyncio.to_thread(partial(fn, *args, **kwargs))
 
-    async def save(self, key: str, data: bytes) -> None:
+    def _put_object(self, key: str, data: bytes) -> None:
+        self._client.put_object(Bucket=self.bucket, Key=key, Body=data)
+
+    def _upload_multipart(self, key: str, src_path: str) -> None:
+        upload_id: str | None = None
         try:
-            await self._run(
-                self._client.put_object,
+            created = self._client.create_multipart_upload(
+                Bucket=self.bucket, Key=key
+            )
+            upload_id = created["UploadId"]
+            parts: list[dict] = []
+            part_number = 1
+            with open(src_path, "rb") as handle:
+                while True:
+                    data = handle.read(_MULTIPART_CHUNKSIZE)
+                    if not data:
+                        break
+                    resp = self._client.upload_part(
+                        Bucket=self.bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        PartNumber=part_number,
+                        Body=data,
+                        ContentLength=len(data),
+                    )
+                    parts.append({"ETag": resp["ETag"], "PartNumber": part_number})
+                    part_number += 1
+            self._client.complete_multipart_upload(
                 Bucket=self.bucket,
                 Key=key,
-                Body=data,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
             )
+            upload_id = None
+        finally:
+            if upload_id is not None:
+                try:
+                    self._client.abort_multipart_upload(
+                        Bucket=self.bucket, Key=key, UploadId=upload_id
+                    )
+                except Exception:
+                    logger.exception("Failed to abort B2 multipart upload %s", key)
+
+    def _upload_file(self, key: str, src_path: str) -> None:
+        size = Path(src_path).stat().st_size
+        if size < _MULTIPART_THRESHOLD:
+            self._put_object(key, Path(src_path).read_bytes())
+            return
+        self._upload_multipart(key, src_path)
+
+    async def save(self, key: str, data: bytes) -> None:
+        try:
+            await self._run(self._put_object, key, data)
         except _UPLOAD_ERRORS as exc:
             raise _friendly_b2_error(exc) from exc
 
     async def save_file(self, key: str, src_path: str) -> None:
         logger.info("Uploading %s to B2 bucket %s", key, self.bucket)
-
-        def _upload():
-            with open(src_path, "rb") as f:
-                self._client.upload_fileobj(
-                    f,
-                    self.bucket,
-                    key,
-                    Config=_transfer_config(),
-                )
-
         try:
-            await self._run(_upload)
+            await self._run(self._upload_file, key, src_path)
         except _UPLOAD_ERRORS as exc:
             raise _friendly_b2_error(_client_error(exc) or exc) from exc
         logger.info("Uploaded %s to B2 bucket %s", key, self.bucket)
