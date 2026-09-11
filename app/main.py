@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     async with async_session() as session:
         await bootstrap_superuser(session, settings.superuser_email, settings.superuser_password)
+    logger.info("Storage backend: %s", settings.storage_backend)
     if not ffprobe_available():
         logger.warning(media_tools_error())
     yield
@@ -45,7 +46,7 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "storage": get_settings().storage_backend}
 
 
 @app.get("/manifest.webmanifest")

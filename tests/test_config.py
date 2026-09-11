@@ -44,3 +44,18 @@ def test_b2_storage_accepts_complete_credentials():
         b2_bucket="bucket",
     )
     assert settings.storage_backend == "b2"
+
+
+def test_storage_backend_normalizes_case():
+    settings = _settings(
+        storage_backend="B2",
+        b2_key_id="id",
+        b2_app_key="key",
+        b2_bucket="bucket",
+    )
+    assert settings.storage_backend == "b2"
+
+
+def test_storage_backend_rejects_unknown():
+    with pytest.raises(ValidationError, match="STORAGE_BACKEND"):
+        _settings(storage_backend="s3")

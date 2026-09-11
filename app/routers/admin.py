@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.config import get_settings
 from app.database import get_session
 from app.deps import require_superuser, template_context
 from app.models import User, UserRole
@@ -47,6 +48,7 @@ async def admin_dashboard(
             "base_url": base_url,
             "active_tab": active_tab,
             "message": request.query_params.get("message"),
+            "storage_backend": get_settings().storage_backend,
         },
     )
 

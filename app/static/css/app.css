@@ -146,6 +146,7 @@ body {
 .status-list, .admin-list { list-style: none; padding: 0; }
 .status-list li, .admin-list li { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
 .admin-section { margin-bottom: 2rem; }
+.admin-storage { margin: -0.5rem 0 1rem; font-size: 0.875rem; color: #718096; }
 
 .admin-tabs {
   display: flex;

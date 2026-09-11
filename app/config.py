@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     session_cookie_samesite: str = "lax"
     debug: bool = False
 
+    @field_validator("storage_backend", mode="before")
+    @classmethod
+    def _normalize_storage_backend(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"local", "b2"}:
+            raise ValueError("STORAGE_BACKEND must be local or b2")
+        return normalized
+
     @field_validator("session_cookie_samesite", mode="before")
     @classmethod
     def _normalize_samesite(cls, value: str) -> str:

@@ -8,7 +8,7 @@ from app.services.rate_limit import rate_limit
 async def test_health(client):
     r = await client.get("/health")
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    assert r.json() == {"status": "ok", "storage": "local"}
 
 
 @pytest.mark.asyncio
@@ -230,6 +230,7 @@ async def test_admin_access(admin_client):
     r = await admin_client.get("/admin")
     assert r.status_code == 200
     assert "Admin" in r.text
+    assert "Storage: local" in r.text
 
 
 @pytest.mark.asyncio

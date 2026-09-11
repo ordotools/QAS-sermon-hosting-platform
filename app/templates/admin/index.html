@@ -2,6 +2,7 @@
 {% block title %}Admin — QAS Media{% endblock %}
 {% block content %}
 <h1 class="page-title">Admin</h1>
+<p class="admin-storage">Storage: {% if storage_backend == 'b2' %}Backblaze B2{% else %}local{% endif %}</p>
 {% if message %}<p class="notice">{{ message }}</p>{% endif %}
 
 <nav class="admin-tabs">

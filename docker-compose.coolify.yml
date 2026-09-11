@@ -8,6 +8,7 @@
 # 4. Service stack → enable "Connect to Predefined Network" → redeploy.
 #    Required so this stack can reach the Coolify-managed Postgres on the shared network.
 # 5. Set env vars below in Coolify (only ${VAR} names listed here are injected).
+#    One STORAGE_BACKEND only (b2). A leftover local row writes to the volume, not B2.
 # 6. Domains: bare SERVICE_URL_APP_8000 (list item) makes Coolify generate a default
 #    URL and proxy to container port 8000. Custom domain: https://your.domain:8000
 #    (:8000 = container port hint; public still 443). Do not use

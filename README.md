@@ -95,6 +95,8 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
    MAX_UPLOAD_SIZE_MB=1500
    ```
 
+   Set **one** `STORAGE_BACKEND`. A duplicate `local` row plus `b2` often interpolates as `local`: uploads succeed, playback works, Backblaze stays empty. After changing env, **redeploy**. Confirm with `echo $STORAGE_BACKEND` in the app container (`b2`) and `GET /health` (`"storage":"b2"`). Objects land under `media/` and `thumbnails/`, not the bucket root. Files already on the volume stay there until re-uploaded.
+
 7. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
 
 The `media_data` volume is scratch only (tus chunks and ffmpeg temps). Finished media and thumbnails live in Backblaze. Playback still goes through `/stream/{id}` — never public B2 URLs.
