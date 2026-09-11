@@ -84,10 +84,9 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
 3. Enable **Connect to Predefined Network** on the service stack, then redeploy.
 4. Set `DATABASE_URL` to the **internal** Postgres URL from the database page as-is (`postgres://...`). The app normalizes it automatically.
 5. Set `SECRET_KEY`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, and `DEBUG=false`.
-6. Set Backblaze as the durable store (compose defaults `STORAGE_BACKEND=b2`; the app will not start without credentials):
+6. Set Backblaze credentials (Coolify always uses B2; local `docker compose` stays on disk). The app will not start without these keys:
 
    ```env
-   STORAGE_BACKEND=b2
    B2_KEY_ID=your-key-id
    B2_APP_KEY=your-app-key
    B2_BUCKET=your-bucket-name
@@ -95,7 +94,7 @@ Deploy the app with a **separate** Coolify PostgreSQL database:
    MAX_UPLOAD_SIZE_MB=1500
    ```
 
-   Set **one** `STORAGE_BACKEND`. A duplicate `local` row plus `b2` often interpolates as `local`: uploads succeed, playback works, Backblaze stays empty. After changing env, **redeploy**. Confirm with `echo $STORAGE_BACKEND` in the app container (`b2`) and `GET /health` (`"storage":"b2"`). Objects land under `media/` and `thumbnails/`, not the bucket root. Files already on the volume stay there until re-uploaded.
+   Do not set `STORAGE_BACKEND=local` in Coolify. Compose pins `STORAGE_BACKEND=b2`, and the app also forces B2 when Coolify env is present. Confirm with `GET /health` (`"storage":"b2"`). Objects land under `media/` and `thumbnails/`, not the bucket root. Files already on the volume stay there until re-uploaded.
 
 7. Redeploy so Coolify parses the bare `SERVICE_URL_APP_8000` magic env (generates a default URL / fills **Links**). For a custom domain, set **Domains** on `app` to `https://<your-domain>:8000` (the `:8000` is the container port hint; visitors still use 443), point DNS at the Coolify server, then redeploy.
 

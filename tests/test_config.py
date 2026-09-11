@@ -12,6 +12,10 @@ def _isolate_settings_env(monkeypatch):
         "B2_APP_KEY",
         "B2_BUCKET",
         "MAX_UPLOAD_SIZE_MB",
+        "COOLIFY_RESOURCE_UUID",
+        "COOLIFY_URL",
+        "COOLIFY_FQDN",
+        "SERVICE_URL_APP_8000",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -59,3 +63,20 @@ def test_storage_backend_normalizes_case():
 def test_storage_backend_rejects_unknown():
     with pytest.raises(ValidationError, match="STORAGE_BACKEND"):
         _settings(storage_backend="s3")
+
+
+def test_coolify_forces_b2_even_if_storage_backend_is_local(monkeypatch):
+    monkeypatch.setenv("COOLIFY_RESOURCE_UUID", "resource-id")
+    settings = _settings(
+        storage_backend="local",
+        b2_key_id="id",
+        b2_app_key="key",
+        b2_bucket="bucket",
+    )
+    assert settings.storage_backend == "b2"
+
+
+def test_coolify_still_requires_b2_credentials(monkeypatch):
+    monkeypatch.setenv("COOLIFY_RESOURCE_UUID", "resource-id")
+    with pytest.raises(ValidationError, match="B2_KEY_ID"):
+        _settings(storage_backend="local", b2_key_id="", b2_app_key="key", b2_bucket="bucket")

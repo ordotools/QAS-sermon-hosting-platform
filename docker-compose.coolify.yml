@@ -8,7 +8,8 @@
 # 4. Service stack → enable "Connect to Predefined Network" → redeploy.
 #    Required so this stack can reach the Coolify-managed Postgres on the shared network.
 # 5. Set env vars below in Coolify (only ${VAR} names listed here are injected).
-#    One STORAGE_BACKEND only (b2). A leftover local row writes to the volume, not B2.
+#    STORAGE_BACKEND is hardcoded to b2 here. Dev compose stays local.
+#    A leftover Coolify STORAGE_BACKEND=local row is ignored.
 # 6. Domains: bare SERVICE_URL_APP_8000 (list item) makes Coolify generate a default
 #    URL and proxy to container port 8000. Custom domain: https://your.domain:8000
 #    (:8000 = container port hint; public still 443). Do not use
@@ -26,7 +27,6 @@ services:
       - SERVICE_URL_APP_8000
       - DATABASE_URL=${DATABASE_URL}
       - SECRET_KEY=${SECRET_KEY}
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-b2}
       - LOCAL_STORAGE_PATH=/app/data/media
       - SUPERUSER_EMAIL=${SUPERUSER_EMAIL}
       - SUPERUSER_PASSWORD=${SUPERUSER_PASSWORD}
@@ -38,6 +38,7 @@ services:
       - B2_ENDPOINT=${B2_ENDPOINT:-https://s3.us-west-004.backblazeb2.com}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1500}
       - SESSION_MAX_AGE=${SESSION_MAX_AGE:-604800}
+      - STORAGE_BACKEND=b2
     volumes:
       - media_data:/app/data/media
     healthcheck:

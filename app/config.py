@@ -1,9 +1,21 @@
+import os
 from functools import lru_cache
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.db_url import normalize_async_database_url
+
+_COOLIFY_MARKERS = (
+    "COOLIFY_RESOURCE_UUID",
+    "COOLIFY_URL",
+    "COOLIFY_FQDN",
+    "SERVICE_URL_APP_8000",
+)
+
+
+def _on_coolify() -> bool:
+    return any(str(os.environ.get(name, "")).strip() for name in _COOLIFY_MARKERS)
 
 
 class Settings(BaseSettings):
@@ -47,6 +59,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_b2_credentials(self) -> "Settings":
+        if _on_coolify() and self.storage_backend != "b2":
+            object.__setattr__(self, "storage_backend", "b2")
         if self.storage_backend != "b2":
             return self
         missing = [
