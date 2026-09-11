@@ -2,6 +2,16 @@ from collections.abc import AsyncIterator
 from typing import Protocol
 
 
+class ObjectNotFoundError(Exception):
+    def __init__(self, key: str = "") -> None:
+        self.key = key
+        super().__init__(key or "Object not found")
+
+
+class StorageUnavailableError(Exception):
+    pass
+
+
 class StorageBackend(Protocol):
     async def save(self, key: str, data: bytes) -> None: ...
     async def save_file(self, key: str, path: str) -> None: ...
@@ -10,3 +20,4 @@ class StorageBackend(Protocol):
     async def get_size(self, key: str) -> int: ...
     async def delete(self, key: str) -> None: ...
     async def exists(self, key: str) -> bool: ...
+    async def check(self) -> None: ...

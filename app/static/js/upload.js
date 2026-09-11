@@ -221,11 +221,21 @@
   }
 
   function dropStoredUpload(prev) {
-    if (!prev?.urlStorageKey) return;
+    const key = prev?.urlStorageKey || prev?._urlStorageKey;
+    if (!key) return;
     try {
-      localStorage.removeItem(prev.urlStorageKey);
+      localStorage.removeItem(key);
     } catch {
       /* ignore */
+    }
+  }
+
+  function forgetFingerprint(upload) {
+    dropStoredUpload(upload);
+    const storage = upload?.urlStorage || upload?._urlStorage;
+    const key = upload?.urlStorageKey || upload?._urlStorageKey;
+    if (key && storage?.removeUpload) {
+      Promise.resolve(storage.removeUpload(key)).catch(() => {});
     }
   }
 
@@ -375,6 +385,7 @@
     pendingMediaId = mediaId ?? null;
     pendingCommit = false;
     commitInFlight = false;
+    forgetFingerprint(activeUpload);
     bytesComplete = false;
     backgroundError = null;
     stallResumes = 0;
@@ -395,7 +406,9 @@
     setSubmitting(false);
     pendingCommit = false;
     commitInFlight = false;
-    activeUpload = null;
+    if (!bytesComplete) {
+      activeUpload = null;
+    }
     backgroundError = null;
     stallResumes = 0;
     ignoreAbort = false;
@@ -513,7 +526,7 @@
       parallelUploads: file.size > PARALLEL_MIN_SIZE ? 2 : 1,
       retryDelays: [1000, 3000, 5000, 10000, 20000],
       storeFingerprintForResuming: true,
-      removeFingerprintOnSuccess: true,
+      removeFingerprintOnSuccess: false,
       metadata: {
         filename: file.name,
         filetype: file.type || 'application/octet-stream',
@@ -695,6 +708,14 @@
     show(progressWrap);
     updateProgress(lastLoaded, lastTotal || file.size || 1);
     await requestWakeLock();
+
+    if (bytesComplete && activeUpload && sameFile(activeFile, file)) {
+      applyCommitMetadata(activeUpload);
+      stopStallWatch();
+      setMessage('Finishing upload…');
+      await commitUpload(startToken);
+      return;
+    }
 
     if (backgroundError || !sameFile(activeFile, file) || !activeUpload) {
       await startBackground(file);

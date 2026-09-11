@@ -15,6 +15,11 @@ from app.models import MediaType
 
 logger = logging.getLogger(__name__)
 
+FFPROBE_TIMEOUT_SECONDS = 30
+FFMPEG_TIMEOUT_SECONDS = 20 * 60
+THUMBNAIL_TIMEOUT_SECONDS = 30
+FFMPEG_THREADS = 2
+
 _COMMON_BIN_DIRS = (
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -114,8 +119,12 @@ def _run_ffprobe(path: str) -> dict:
             capture_output=True,
             text=True,
             check=True,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
         )
         return json.loads(result.stdout)
+    except subprocess.TimeoutExpired:
+        logger.error("ffprobe timed out after %ss for %s", FFPROBE_TIMEOUT_SECONDS, path)
+        return {}
     except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
         logger.debug("ffprobe failed for %s: %s", path, exc)
         return {}
@@ -277,7 +286,18 @@ def _run_ffmpeg(args: list[str]) -> None:
         raise RuntimeError("ffmpeg not found")
 
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", *args]
-    result = subprocess.run(cmd, capture_output=True, check=False)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            check=False,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("ffmpeg timed out after %ss", FFMPEG_TIMEOUT_SECONDS)
+        raise RuntimeError(
+            "Processing timed out. Try a shorter or smaller file."
+        ) from exc
     if result.returncode == 0:
         return
     stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
@@ -329,7 +349,7 @@ def transcode_video(src: str, dest: str) -> None:
             "-b:a",
             "128k",
             "-threads",
-            "0",
+            str(FFMPEG_THREADS),
             "-movflags",
             "+faststart",
             dest,

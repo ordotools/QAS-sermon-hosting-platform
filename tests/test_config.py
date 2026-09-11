@@ -11,6 +11,7 @@ def _isolate_settings_env(monkeypatch):
         "B2_KEY_ID",
         "B2_APP_KEY",
         "B2_BUCKET",
+        "B2_ENDPOINT",
         "MAX_UPLOAD_SIZE_MB",
         "COOLIFY_RESOURCE_UUID",
         "COOLIFY_URL",
@@ -48,6 +49,28 @@ def test_b2_storage_accepts_complete_credentials():
         b2_bucket="bucket",
     )
     assert settings.storage_backend == "b2"
+
+
+def test_b2_storage_requires_endpoint():
+    with pytest.raises(ValidationError, match="B2_ENDPOINT"):
+        _settings(
+            storage_backend="b2",
+            b2_key_id="id",
+            b2_app_key="key",
+            b2_bucket="bucket",
+            b2_endpoint="",
+        )
+
+
+def test_b2_storage_rejects_whitespace_endpoint():
+    with pytest.raises(ValidationError, match="B2_ENDPOINT"):
+        _settings(
+            storage_backend="b2",
+            b2_key_id="id",
+            b2_app_key="key",
+            b2_bucket="bucket",
+            b2_endpoint="  ",
+        )
 
 
 def test_b2_credentials_strip_quotes_and_whitespace():

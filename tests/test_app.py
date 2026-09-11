@@ -12,6 +12,43 @@ async def test_health(client):
 
 
 @pytest.mark.asyncio
+async def test_health_b2_ok(client, monkeypatch):
+    class FakeSettings:
+        storage_backend = "b2"
+
+    class FakeStorage:
+        async def check(self):
+            return None
+
+    monkeypatch.setattr("app.main.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("app.main.get_storage", lambda: FakeStorage())
+    r = await client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "storage": "b2"}
+
+
+@pytest.mark.asyncio
+async def test_health_b2_failure_returns_503(client, monkeypatch):
+    from app.storage.base import StorageUnavailableError
+
+    class FakeSettings:
+        storage_backend = "b2"
+
+    class FakeStorage:
+        async def check(self):
+            raise StorageUnavailableError("Backblaze rejected B2_KEY_ID")
+
+    monkeypatch.setattr("app.main.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("app.main.get_storage", lambda: FakeStorage())
+    r = await client.get("/health")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "error"
+    assert body["storage"] == "b2"
+    assert "B2_KEY_ID" in body["error"]
+
+
+@pytest.mark.asyncio
 async def test_index_public(client):
     r = await client.get("/")
     assert r.status_code == 200
@@ -223,7 +260,7 @@ async def test_upload_valid_mp3_creates_ready_record(auth_client, session, monke
 
     pending: list[tuple[int, str]] = []
 
-    def capture(media_id: int, temp_path: str) -> None:
+    def capture(media_id: int, temp_path: str, _probe=None) -> None:
         pending.append((media_id, temp_path))
 
     monkeypatch.setattr("app.routers.upload.schedule_processing", capture)
@@ -369,6 +406,197 @@ async def test_stream_range(client, session, tmp_path):
     assert r.status_code == 206
     assert len(r.content) == 100
     assert r.headers.get("content-range") == "bytes 0-99/1000"
+
+
+@pytest.mark.asyncio
+async def test_stream_missing_object_is_404(client, session, monkeypatch):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+    from app.storage.base import ObjectNotFoundError
+
+    user = await get_user_by_email(session, "admin@test.com")
+    item = MediaItem(
+        title="Missing",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/gone.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.ready,
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    class FakeStorage:
+        async def get_size(self, key):
+            raise ObjectNotFoundError(key)
+
+        async def exists(self, key):
+            raise AssertionError("exists should not be called")
+
+    monkeypatch.setattr("app.routers.stream.get_storage", lambda: FakeStorage())
+    r = await client.get(f"/stream/{item.id}")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "File not found"
+
+
+@pytest.mark.asyncio
+async def test_stream_storage_outage_is_502(client, session, monkeypatch):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+    from app.storage.base import StorageUnavailableError
+
+    user = await get_user_by_email(session, "admin@test.com")
+    item = MediaItem(
+        title="Outage",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/a.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.ready,
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    class FakeStorage:
+        async def get_size(self, key):
+            raise StorageUnavailableError("Connection was closed")
+
+        async def exists(self, key):
+            raise AssertionError("exists should not be called")
+
+    monkeypatch.setattr("app.routers.stream.get_storage", lambda: FakeStorage())
+    r = await client.get(f"/stream/{item.id}")
+    assert r.status_code == 502
+    assert r.json()["detail"] == "Storage unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_one_head(client, session, monkeypatch):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+
+    user = await get_user_by_email(session, "admin@test.com")
+    item = MediaItem(
+        title="Once",
+        media_type=MediaType.audio,
+        published_at=datetime.utcnow(),
+        storage_key="media/a.mp3",
+        mime_type="audio/mpeg",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.ready,
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    heads = {"n": 0}
+
+    class FakeStorage:
+        async def get_size(self, key):
+            heads["n"] += 1
+            return 4
+
+        async def exists(self, key):
+            raise AssertionError("exists should not be called")
+
+        async def open_stream(self, key):
+            yield b"data"
+
+        async def read_range(self, key, start, end):
+            yield b"data"
+
+    monkeypatch.setattr("app.routers.stream.get_storage", lambda: FakeStorage())
+    r = await client.get(f"/stream/{item.id}")
+    assert r.status_code == 200
+    assert r.content == b"data"
+    assert heads["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_missing_is_404(client, session, monkeypatch):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+    from app.storage.base import ObjectNotFoundError
+
+    user = await get_user_by_email(session, "admin@test.com")
+    item = MediaItem(
+        title="Thumb",
+        media_type=MediaType.video,
+        published_at=datetime.utcnow(),
+        storage_key="media/a.mp4",
+        mime_type="video/mp4",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.ready,
+        thumbnail_key="thumbnails/1.jpg",
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    class FakeStorage:
+        async def get_size(self, key):
+            raise ObjectNotFoundError(key)
+
+        async def exists(self, key):
+            raise AssertionError("exists should not be called")
+
+    monkeypatch.setattr("app.routers.stream.get_storage", lambda: FakeStorage())
+    r = await client.get(f"/thumbnail/{item.id}")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "File not found"
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_storage_outage_is_502(client, session, monkeypatch):
+    from datetime import datetime
+
+    from app.models import MediaItem, MediaStatus, MediaType
+    from app.services.auth import get_user_by_email
+    from app.storage.base import StorageUnavailableError
+
+    user = await get_user_by_email(session, "admin@test.com")
+    item = MediaItem(
+        title="Thumb",
+        media_type=MediaType.video,
+        published_at=datetime.utcnow(),
+        storage_key="media/a.mp4",
+        mime_type="video/mp4",
+        file_size=4,
+        uploaded_by_id=user.id,
+        status=MediaStatus.ready,
+        thumbnail_key="thumbnails/1.jpg",
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    class FakeStorage:
+        async def get_size(self, key):
+            raise StorageUnavailableError("timeout")
+
+        async def exists(self, key):
+            raise AssertionError("exists should not be called")
+
+    monkeypatch.setattr("app.routers.stream.get_storage", lambda: FakeStorage())
+    r = await client.get(f"/thumbnail/{item.id}")
+    assert r.status_code == 502
+    assert r.json()["detail"] == "Storage unavailable"
 
 
 def test_rate_limit_blocks_excess_requests():

@@ -8,6 +8,7 @@ from app.database import get_session
 from app.models import MediaStatus
 from app.services.media import get_media
 from app.storage import get_storage
+from app.storage.base import ObjectNotFoundError, StorageUnavailableError
 
 router = APIRouter(tags=["stream"])
 
@@ -27,6 +28,17 @@ def _parse_range(range_header: str | None, file_size: int) -> tuple[int, int] | 
     return start, end
 
 
+def _raise_storage(exc: BaseException) -> None:
+    if isinstance(exc, (ObjectNotFoundError, FileNotFoundError)):
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    if isinstance(exc, StorageUnavailableError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Storage unavailable",
+        ) from exc
+    raise exc
+
+
 @router.get("/stream/{media_id}")
 async def stream_media(
     media_id: int,
@@ -38,10 +50,12 @@ async def stream_media(
         raise HTTPException(status_code=404, detail="Not found")
 
     storage = get_storage()
-    if not await storage.exists(item.storage_key):
-        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        file_size = await storage.get_size(item.storage_key)
+    except (ObjectNotFoundError, FileNotFoundError, StorageUnavailableError) as exc:
+        _raise_storage(exc)
+        raise
 
-    file_size = await storage.get_size(item.storage_key)
     byte_range = _parse_range(request.headers.get("range"), file_size)
 
     headers = {
@@ -86,8 +100,11 @@ async def stream_thumbnail(
         raise HTTPException(status_code=404, detail="Not found")
 
     storage = get_storage()
-    if not await storage.exists(item.thumbnail_key):
-        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        await storage.get_size(item.thumbnail_key)
+    except (ObjectNotFoundError, FileNotFoundError, StorageUnavailableError) as exc:
+        _raise_storage(exc)
+        raise
 
     async def gen():
         async for chunk in storage.open_stream(item.thumbnail_key):

@@ -58,12 +58,28 @@ def create(upload: TusUpload) -> None:
 
 def write_concat(dest: TusUpload, part_uids: list[str]) -> None:
     dest_path = data_path(dest.uid)
+    if len(part_uids) == 1:
+        data_path(part_uids[0]).replace(dest_path)
+        dest.offset = dest.size
+        save(dest)
+        return
     with dest_path.open("wb") as out:
         for uid in part_uids:
             with data_path(uid).open("rb") as inp:
                 shutil.copyfileobj(inp, out, length=1024 * 1024)
     dest.offset = dest.size
     save(dest)
+
+
+def find_path_for_media(media_id: int) -> Path | None:
+    for info in tus_dir().glob("*.info"):
+        upload = load(info.stem)
+        if upload is None or upload.media_id != media_id:
+            continue
+        path = data_path(upload.uid)
+        if path.is_file():
+            return path
+    return None
 
 
 def delete(uid: str) -> None:

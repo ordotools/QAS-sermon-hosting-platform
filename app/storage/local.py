@@ -5,6 +5,7 @@ from pathlib import Path
 import aiofiles
 
 from app.config import get_settings
+from app.storage.base import ObjectNotFoundError
 
 
 class LocalStorage:
@@ -53,10 +54,16 @@ class LocalStorage:
                 remaining -= len(chunk)
 
     async def get_size(self, key: str) -> int:
-        return self._path(key).stat().st_size
+        try:
+            return self._path(key).stat().st_size
+        except FileNotFoundError as exc:
+            raise ObjectNotFoundError(key) from exc
 
     async def exists(self, key: str) -> bool:
         return self._path(key).exists()
+
+    async def check(self) -> None:
+        return None
 
     async def delete(self, key: str) -> None:
         path = self._path(key)
